@@ -17,6 +17,21 @@ export const AgentConfigSchema = z
     stop_loss_pct: z.number().min(1).max(50),
     position_size_pct_of_cash: z.number().min(1).max(100),
 
+    // Entry quality gates (market-data based)
+    entry_min_price: z.number().min(0).max(100000),
+    entry_min_dollar_volume: z.number().min(0).max(1_000_000_000_000),
+    entry_max_spread_bps: z.number().min(0).max(10000),
+    entry_trend_timeframe: z.string().min(1),
+    entry_trend_lookback_bars: z.number().int().min(2).max(200),
+    entry_min_trend_return_pct: z.number().min(-100).max(100),
+
+    // Market regime filter
+    regime_filter_enabled: z.boolean(),
+    regime_symbol: z.string().min(1),
+    regime_timeframe: z.string().min(1),
+    regime_lookback_bars: z.number().int().min(2).max(200),
+    regime_min_return_pct: z.number().min(-100).max(100),
+
     stale_position_enabled: z.boolean(),
     stale_min_hold_hours: z.number().min(0).max(168),
     stale_max_hold_days: z.number().min(1).max(30),
@@ -28,6 +43,7 @@ export const AgentConfigSchema = z
     llm_provider: z.enum(["openai-raw", "ai-sdk", "cloudflare-gateway"]),
     llm_model: z.string().min(1),
     llm_analyst_model: z.string().min(1),
+    llm_min_hold_minutes: z.number().int().min(0).max(1440),
 
     options_enabled: z.boolean(),
     options_min_confidence: z.number().min(0).max(1),
@@ -48,6 +64,7 @@ export const AgentConfigSchema = z
     crypto_stop_loss_pct: z.number().min(1).max(50),
 
     ticker_blacklist: z.array(z.string()),
+    allowed_exchanges: z.array(z.string()),
   })
   .refine((data) => data.options_min_delta < data.options_max_delta, {
     message: "options_min_delta must be less than options_max_delta",

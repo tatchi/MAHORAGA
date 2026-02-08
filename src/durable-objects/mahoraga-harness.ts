@@ -64,10 +64,25 @@ interface AgentConfig {
   min_sentiment_score: number; // [TUNE] Min sentiment to consider buying (0-1)
   min_analyst_confidence: number; // [TUNE] Min LLM confidence to execute (0-1)
 
-  // Risk management - take profit and stop loss
-  take_profit_pct: number; // [TUNE] Take profit at this % gain
-  stop_loss_pct: number; // [TUNE] Stop loss at this % loss
-  position_size_pct_of_cash: number; // [TUNE] % of cash per trade
+	  // Risk management - take profit and stop loss
+	  take_profit_pct: number; // [TUNE] Take profit at this % gain
+	  stop_loss_pct: number; // [TUNE] Stop loss at this % loss
+	  position_size_pct_of_cash: number; // [TUNE] % of cash per trade
+
+	  // Entry quality gates (market-data based) - reduce trading on illiquid/noisy names
+	  entry_min_price: number;
+	  entry_min_dollar_volume: number;
+	  entry_max_spread_bps: number;
+	  entry_trend_timeframe: string;
+	  entry_trend_lookback_bars: number;
+	  entry_min_trend_return_pct: number;
+
+	  // Market regime filter - avoid buying risk-on setups in weak tape
+	  regime_filter_enabled: boolean;
+	  regime_symbol: string;
+	  regime_timeframe: string;
+	  regime_lookback_bars: number;
+	  regime_min_return_pct: number;
 
   // Stale position management - exit positions that have lost momentum
   stale_position_enabled: boolean;
@@ -293,6 +308,19 @@ const DEFAULT_CONFIG: AgentConfig = {
   take_profit_pct: 10,
   stop_loss_pct: 5,
   position_size_pct_of_cash: 25,
+  // Entry quality gates (market-data based)
+  entry_min_price: 2,
+  entry_min_dollar_volume: 10_000_000,
+  entry_max_spread_bps: 50,
+  entry_trend_timeframe: "1Hour",
+  entry_trend_lookback_bars: 20,
+  entry_min_trend_return_pct: 0.5,
+  // Market regime filter (optional)
+  regime_filter_enabled: false,
+  regime_symbol: "SPY",
+  regime_timeframe: "1Day",
+  regime_lookback_bars: 50,
+  regime_min_return_pct: 0,
   stale_position_enabled: true,
   stale_min_hold_hours: 24,
   stale_max_hold_days: 3,
@@ -3112,6 +3140,12 @@ Response format:
             return false;
           }
         }
+
+        const gate = await this.preTradeGates(alpaca, symbol);
+        if (!gate.ok) {
+          this.log("Executor", "buy_blocked", { symbol, reason: gate.reason, ...gate.details });
+          return false;
+        }
       }
 
       const order = await alpaca.trading.createOrder({
@@ -3128,6 +3162,110 @@ Response format:
       this.log("Executor", "buy_failed", { symbol, error: String(error) });
       return false;
     }
+  }
+
+  private getConfigNumber(key: string, fallback: number): number {
+    const value = (this.state.config as unknown as Record<string, unknown>)[key];
+    return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+  }
+
+  private getConfigString(key: string, fallback: string): string {
+    const value = (this.state.config as unknown as Record<string, unknown>)[key];
+    return typeof value === "string" && value.trim().length > 0 ? value : fallback;
+  }
+
+  private getConfigBoolean(key: string, fallback: boolean): boolean {
+    const value = (this.state.config as unknown as Record<string, unknown>)[key];
+    return typeof value === "boolean" ? value : fallback;
+  }
+
+  private async preTradeGates(
+    alpaca: ReturnType<typeof createAlpacaProviders>,
+    symbol: string
+  ): Promise<{ ok: true } | { ok: false; reason: string; details?: Record<string, unknown> }> {
+    const minPrice = this.getConfigNumber("entry_min_price", 2);
+    const minDollarVolume = this.getConfigNumber("entry_min_dollar_volume", 10_000_000);
+    const maxSpreadBps = this.getConfigNumber("entry_max_spread_bps", 50);
+
+    const trendTimeframe = this.getConfigString("entry_trend_timeframe", "1Hour");
+    const trendLookbackBars = Math.round(this.getConfigNumber("entry_trend_lookback_bars", 20));
+    const minTrendReturnPct = this.getConfigNumber("entry_min_trend_return_pct", 0.5);
+
+    const regimeEnabled = this.getConfigBoolean("regime_filter_enabled", false);
+    const regimeSymbol = this.getConfigString("regime_symbol", "SPY");
+    const regimeTimeframe = this.getConfigString("regime_timeframe", "1Day");
+    const regimeLookbackBars = Math.round(this.getConfigNumber("regime_lookback_bars", 50));
+    const regimeMinReturnPct = this.getConfigNumber("regime_min_return_pct", 0);
+
+    const snapshot = await alpaca.marketData.getSnapshot(symbol).catch(() => null);
+    if (!snapshot) {
+      return { ok: false, reason: "No market snapshot (market data unavailable)" };
+    }
+
+    const price =
+      snapshot.latest_trade?.price || snapshot.latest_quote?.ask_price || snapshot.latest_quote?.bid_price || 0;
+    if (price <= 0) {
+      return { ok: false, reason: "No valid price from snapshot" };
+    }
+
+    if (price < minPrice) {
+      return { ok: false, reason: "Price below minimum", details: { price, minPrice } };
+    }
+
+    const bid = snapshot.latest_quote?.bid_price || 0;
+    const ask = snapshot.latest_quote?.ask_price || 0;
+    const mid = bid > 0 && ask > 0 ? (bid + ask) / 2 : 0;
+    const spreadBps = mid > 0 ? ((ask - bid) / mid) * 10_000 : Number.POSITIVE_INFINITY;
+
+    if (!Number.isFinite(spreadBps) || spreadBps > maxSpreadBps) {
+      return {
+        ok: false,
+        reason: "Spread too wide",
+        details: { bid, ask, spreadBps: Number.isFinite(spreadBps) ? spreadBps : null, maxSpreadBps },
+      };
+    }
+
+    const daily = snapshot.daily_bar;
+    const dailyDollarVolume = daily && daily.v > 0 ? daily.v * (daily.vw || daily.c) : 0;
+    if (dailyDollarVolume < minDollarVolume) {
+      return {
+        ok: false,
+        reason: "Dollar volume too low",
+        details: { dailyDollarVolume, minDollarVolume, dailyVolume: daily?.v ?? 0 },
+      };
+    }
+
+    if (trendLookbackBars >= 2) {
+      const bars = await alpaca.marketData.getBars(symbol, trendTimeframe, { limit: Math.min(200, trendLookbackBars) });
+      if (bars.length >= 2) {
+        const first = bars[0]!.c || bars[0]!.o;
+        const last = bars[bars.length - 1]!.c;
+        const retPct = first > 0 ? ((last - first) / first) * 100 : 0;
+        if (retPct < minTrendReturnPct) {
+          return { ok: false, reason: "Trend not confirmed", details: { retPct, minTrendReturnPct, trendTimeframe } };
+        }
+      }
+    }
+
+    if (regimeEnabled && regimeSymbol) {
+      const bars = await alpaca.marketData.getBars(regimeSymbol, regimeTimeframe, {
+        limit: Math.min(200, Math.max(2, regimeLookbackBars)),
+      });
+      if (bars.length >= 2) {
+        const first = bars[0]!.c || bars[0]!.o;
+        const last = bars[bars.length - 1]!.c;
+        const retPct = first > 0 ? ((last - first) / first) * 100 : 0;
+        if (retPct < regimeMinReturnPct) {
+          return {
+            ok: false,
+            reason: "Market regime filter blocked entry",
+            details: { regimeSymbol, regimeTimeframe, retPct, regimeMinReturnPct },
+          };
+        }
+      }
+    }
+
+    return { ok: true };
   }
 
   private async executeSell(

@@ -14,6 +14,17 @@ function createValidConfig() {
     take_profit_pct: 10,
     stop_loss_pct: 5,
     position_size_pct_of_cash: 10,
+    entry_min_price: 2,
+    entry_min_dollar_volume: 10_000_000,
+    entry_max_spread_bps: 50,
+    entry_trend_timeframe: "1Hour",
+    entry_trend_lookback_bars: 20,
+    entry_min_trend_return_pct: 0.5,
+    regime_filter_enabled: false,
+    regime_symbol: "SPY",
+    regime_timeframe: "1Day",
+    regime_lookback_bars: 50,
+    regime_min_return_pct: 0,
     stale_position_enabled: true,
     stale_min_hold_hours: 4,
     stale_max_hold_days: 7,
@@ -24,6 +35,7 @@ function createValidConfig() {
     llm_provider: "openai-raw" as const,
     llm_model: "gpt-4o-mini",
     llm_analyst_model: "gpt-4o",
+    llm_min_hold_minutes: 30,
     options_enabled: false,
     options_min_confidence: 0.8,
     options_max_pct_per_trade: 0.02,
@@ -41,6 +53,7 @@ function createValidConfig() {
     crypto_take_profit_pct: 15,
     crypto_stop_loss_pct: 10,
     ticker_blacklist: [],
+    allowed_exchanges: ["NYSE", "NASDAQ"],
   };
 }
 
