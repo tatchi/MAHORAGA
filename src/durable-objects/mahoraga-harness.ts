@@ -40,6 +40,7 @@ import type { Env } from "../env.d";
 import { createAlpacaProviders } from "../providers/alpaca";
 import { createLLMProvider } from "../providers/llm/factory";
 import type { Account, LLMProvider, MarketClock, Position } from "../providers/types";
+import { capByVolumeKeepingPinnedMap, capByVolumeKeepingPinnedRecord } from "./social-bounds";
 
 // ============================================================================
 // SECTION 1: TYPES & CONFIGURATION
@@ -211,7 +212,7 @@ interface AgentState {
   signalCache: Signal[];
   positionEntries: Record<string, PositionEntry>;
   socialHistory: Record<string, SocialHistoryEntry[]>;
-  // Cached aggregated social snapshot from the *full gathered* signal set (age-filtered, but not capped/sorted).
+  // Cached aggregated social snapshot from the gathered signal set (age-filtered and volume-capped).
   // Needed because `signalCache` is intentionally capped (and sorted by abs(sentiment)) which can drop
   // otherwise-relevant symbols and incorrectly treat their current social volume as 0.
   socialSnapshotCache: Record<string, SocialSnapshotCacheEntry>;
@@ -348,6 +349,17 @@ const DEFAULT_STATE: AgentState = {
   lastClockIsOpen: null,
   enabled: false,
 };
+
+// NOTE: Durable Object storage writes for the single `state` value can fail if the payload grows too large.
+// The social snapshot/history structures are especially prone to blow-up when the gatherers observe many symbols
+// (e.g., broad Reddit extraction across multiple subreddits). A failed `put("state", ...)` can effectively
+// "brick" the agent across restarts because it can no longer persist progress/config changes.
+//
+// Strategy:
+// - Persist `socialSnapshotCache` as: (all held symbols) + (top-N by volume), capped by `SOCIAL_SNAPSHOT_CACHE_MAX_SYMBOLS`.
+// - Persist `socialHistory` only for held symbols (24h window), since that's what staleness tracking actually needs.
+const SOCIAL_SNAPSHOT_CACHE_MAX_SYMBOLS = 250;
+const SOCIAL_HISTORY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 // Blacklist for ticker extraction - common English words and trading slang
 const TICKER_BLACKLIST = new Set([
@@ -739,7 +751,9 @@ function calculateTimeDecay(postTimestamp: number): number {
 
 function getEngagementMultiplier(upvotes: number, comments: number): number {
   let upvoteMultiplier = 0.8;
-  const upvoteThresholds = Object.entries(SOURCE_CONFIG.engagement.upvotes).toSorted(([a], [b]) => Number(b) - Number(a));
+  const upvoteThresholds = Object.entries(SOURCE_CONFIG.engagement.upvotes).toSorted(
+    ([a], [b]) => Number(b) - Number(a)
+  );
   for (const [threshold, mult] of upvoteThresholds) {
     if (upvotes >= parseInt(threshold, 10)) {
       upvoteMultiplier = mult;
@@ -748,7 +762,9 @@ function getEngagementMultiplier(upvotes: number, comments: number): number {
   }
 
   let commentMultiplier = 0.9;
-  const commentThresholds = Object.entries(SOURCE_CONFIG.engagement.comments).toSorted(([a], [b]) => Number(b) - Number(a));
+  const commentThresholds = Object.entries(SOURCE_CONFIG.engagement.comments).toSorted(
+    ([a], [b]) => Number(b) - Number(a)
+  );
   for (const [threshold, mult] of commentThresholds) {
     if (comments >= parseInt(threshold, 10)) {
       commentMultiplier = mult;
@@ -867,6 +883,7 @@ export class MahoragaHarness extends DurableObject<Env> {
         this.state = { ...DEFAULT_STATE, ...stored };
         this.state.config = { ...DEFAULT_STATE.config, ...this.state.config };
       }
+      this.sanitizePersistedSocialState(Date.now());
       this.initializeLLM();
 
       // Reschedule alarm if stale - in local dev, past alarms don't fire on restart;
@@ -954,7 +971,9 @@ export class MahoragaHarness extends DurableObject<Env> {
     try {
       const alpaca = createAlpacaProviders(this.env);
       const clock = await alpaca.trading.getClock();
-      const clockNowMs = Number.isFinite(new Date(clock.timestamp).getTime()) ? new Date(clock.timestamp).getTime() : now;
+      const clockNowMs = Number.isFinite(new Date(clock.timestamp).getTime())
+        ? new Date(clock.timestamp).getTime()
+        : now;
       const etDay = this.getEtDayString(clockNowMs);
       const nextOpenMs = new Date(clock.next_open).getTime();
       const nextOpenValid = Number.isFinite(nextOpenMs);
@@ -967,26 +986,30 @@ export class MahoragaHarness extends DurableObject<Env> {
         await this.runDataGatherers();
       }
 
-	      if (now - this.state.lastResearchRun >= RESEARCH_INTERVAL_MS) {
-	        await this.researchTopSignals(5);
-	        this.state.lastResearchRun = now;
-	      }
+      if (now - this.state.lastResearchRun >= RESEARCH_INTERVAL_MS) {
+        await this.researchTopSignals(5);
+        this.state.lastResearchRun = now;
+      }
 
-	      if (this.state.premarketPlan && this.state.lastPremarketPlanDayEt && this.state.lastPremarketPlanDayEt !== etDay) {
-	        this.log("System", "clearing_stale_premarket_plan", {
-	          stale_day: this.state.lastPremarketPlanDayEt,
-	          current_day: etDay,
-	        });
-	        this.state.premarketPlan = null;
-	        this.state.lastPremarketPlanDayEt = null;
-	      }
+      if (
+        this.state.premarketPlan &&
+        this.state.lastPremarketPlanDayEt &&
+        this.state.lastPremarketPlanDayEt !== etDay
+      ) {
+        this.log("System", "clearing_stale_premarket_plan", {
+          stale_day: this.state.lastPremarketPlanDayEt,
+          current_day: etDay,
+        });
+        this.state.premarketPlan = null;
+        this.state.lastPremarketPlanDayEt = null;
+      }
 
-	      if (!clock.is_open && !this.state.premarketPlan) {
-	        const minutesToOpen = nextOpenValid ? (nextOpenMs - clockNowMs) / 60000 : Number.POSITIVE_INFINITY;
-	        const shouldPlan =
-	          minutesToOpen > 0 &&
-	          minutesToOpen <= premarketPlanWindowMinutes &&
-	          this.state.lastPremarketPlanDayEt !== etDay;
+      if (!clock.is_open && !this.state.premarketPlan) {
+        const minutesToOpen = nextOpenValid ? (nextOpenMs - clockNowMs) / 60000 : Number.POSITIVE_INFINITY;
+        const shouldPlan =
+          minutesToOpen > 0 &&
+          minutesToOpen <= premarketPlanWindowMinutes &&
+          this.state.lastPremarketPlanDayEt !== etDay;
 
         if (shouldPlan) {
           await this.runPreMarketAnalysis();
@@ -1005,9 +1028,7 @@ export class MahoragaHarness extends DurableObject<Env> {
         const hasOpenMs = typeof lastKnownOpenMs === "number" && Number.isFinite(lastKnownOpenMs);
         const openWindowMs = marketOpenExecuteWindowMinutes * 60_000;
         const withinOpenWindow =
-          hasOpenMs &&
-          clockNowMs >= lastKnownOpenMs &&
-          clockNowMs - lastKnownOpenMs <= openWindowMs;
+          hasOpenMs && clockNowMs >= lastKnownOpenMs && clockNowMs - lastKnownOpenMs <= openWindowMs;
         const clockStateUnknown = this.state.lastClockIsOpen == null;
         const marketJustOpened = this.state.lastClockIsOpen === false && clock.is_open;
 
@@ -1017,13 +1038,13 @@ export class MahoragaHarness extends DurableObject<Env> {
         // Fallback behavior: if we don't have an open timestamp (e.g., first tick after a deploy/migration),
         // avoid using a potentially-wrong edge detector. Instead:
         // - execute on the true "closed -> open" edge when we have prior state, or
-	        // - if the prior state is unknown, allow a single attempt and rely on plan staleness to prevent late execution.
-	        const shouldExecutePremarketPlan =
-	          !!this.state.premarketPlan &&
-	          ((hasOpenMs && withinOpenWindow) || marketJustOpened || (!hasOpenMs && clockStateUnknown));
-	        if (shouldExecutePremarketPlan) {
-	          await this.executePremarketPlan();
-	        }
+        // - if the prior state is unknown, allow a single attempt and rely on plan staleness to prevent late execution.
+        const shouldExecutePremarketPlan =
+          !!this.state.premarketPlan &&
+          ((hasOpenMs && withinOpenWindow) || marketJustOpened || (!hasOpenMs && clockStateUnknown));
+        if (shouldExecutePremarketPlan) {
+          await this.executePremarketPlan();
+        }
 
         if (now - this.state.lastAnalystRun >= this.state.config.analyst_interval_ms) {
           await this.runAnalyst();
@@ -1371,10 +1392,26 @@ export class MahoragaHarness extends DurableObject<Env> {
 
     // Build staleness/entry metrics from the full eligible set before capping signals.
     // This avoids "social volume == 0" for symbols that were gathered but filtered out by the cap.
-    const socialSnapshot = this.buildSocialSnapshot(eligibleSignals);
-    this.updateSocialHistoryFromSnapshot(socialSnapshot, now);
+    const socialSnapshotFull = this.buildSocialSnapshot(eligibleSignals);
+
+    // Bound persisted social state to avoid Durable Object storage failures when the gatherers return many symbols.
+    // - Snapshot cache: keep pinned (held) symbols + top-N by volume (used for staleness + entry metadata)
+    // - Social history: keep only pinned (held) symbols (the only ones we use for ongoing staleness tracking)
+    const pinnedSymbols = Object.keys(this.state.positionEntries || {});
+    const pinnedSet = new Set(pinnedSymbols);
+
+    const socialSnapshotCapped = capByVolumeKeepingPinnedMap(
+      socialSnapshotFull,
+      SOCIAL_SNAPSHOT_CACHE_MAX_SYMBOLS,
+      pinnedSymbols
+    );
+
+    // Only update history for held symbols; histories for non-held symbols are intentionally not persisted.
+    // This keeps DO state bounded without affecting the trading logic that uses history (staleness for held positions).
+    const historySnapshot = new Map(Array.from(socialSnapshotFull).filter(([symbol]) => pinnedSet.has(symbol)));
+    this.updateSocialHistoryFromSnapshot(historySnapshot, now);
     this.state.socialSnapshotCache = {};
-    for (const [symbol, s] of socialSnapshot) {
+    for (const [symbol, s] of socialSnapshotCapped) {
       this.state.socialSnapshotCache[symbol] = {
         volume: s.volume,
         sentiment: s.sentiment,
@@ -1383,7 +1420,9 @@ export class MahoragaHarness extends DurableObject<Env> {
     }
     this.state.socialSnapshotCacheUpdatedAt = now;
 
-    const freshSignals = eligibleSignals.toSorted((a, b) => Math.abs(b.sentiment) - Math.abs(a.sentiment)).slice(0, MAX_SIGNALS);
+    const freshSignals = eligibleSignals
+      .toSorted((a, b) => Math.abs(b.sentiment) - Math.abs(a.sentiment))
+      .slice(0, MAX_SIGNALS);
 
     this.state.signalCache = freshSignals;
     this.state.lastDataGatherRun = now;
@@ -1444,7 +1483,6 @@ export class MahoragaHarness extends DurableObject<Env> {
     nowMs: number
   ): void {
     const SOCIAL_HISTORY_BUCKET_MS = 5 * 60 * 1000;
-    const SOCIAL_HISTORY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
     const cutoff = nowMs - SOCIAL_HISTORY_MAX_AGE_MS;
 
     const touchedSymbols = new Set<string>();
@@ -1487,7 +1525,7 @@ export class MahoragaHarness extends DurableObject<Env> {
 
   private getSocialSnapshotCache(): Record<string, SocialSnapshotCacheEntry> {
     // Prefer the snapshot captured during the most recent gather run. This represents the full gathered set
-    // (age-filtered, uncapped), while `signalCache` is capped and sentiment-biased for research/LLM costs.
+    // (age-filtered and volume-capped), while `signalCache` is capped and sentiment-biased for research/LLM costs.
     if (this.state.socialSnapshotCacheUpdatedAt > 0) {
       return this.state.socialSnapshotCache;
     }
@@ -1499,6 +1537,38 @@ export class MahoragaHarness extends DurableObject<Env> {
       out[symbol] = { volume: s.volume, sentiment: s.sentiment, sources: Array.from(s.sources) };
     }
     return out;
+  }
+
+  private sanitizePersistedSocialState(nowMs: number): void {
+    // Called on startup (after loading persisted state) and before every persist.
+    // This ensures we never carry forward unbounded social caches that could make future writes fail.
+    const pinnedSymbols = Object.keys(this.state.positionEntries || {});
+    const pinnedSet = new Set(pinnedSymbols);
+
+    this.state.socialSnapshotCache = capByVolumeKeepingPinnedRecord(
+      this.state.socialSnapshotCache ?? {},
+      SOCIAL_SNAPSHOT_CACHE_MAX_SYMBOLS,
+      pinnedSymbols
+    );
+
+    // Keep social history only for held symbols to prevent unbounded state growth.
+    const cutoff = nowMs - SOCIAL_HISTORY_MAX_AGE_MS;
+    for (const symbol of Object.keys(this.state.socialHistory ?? {})) {
+      if (!pinnedSet.has(symbol)) {
+        // Not held => delete entirely (we don't need history for non-held symbols).
+        delete this.state.socialHistory[symbol];
+        continue;
+      }
+      const history = this.state.socialHistory[symbol];
+      if (!history || history.length === 0) {
+        delete this.state.socialHistory[symbol];
+        continue;
+      }
+      this.pruneSocialHistoryInPlace(history, cutoff);
+      if (history.length === 0) {
+        delete this.state.socialHistory[symbol];
+      }
+    }
   }
 
   private async gatherStockTwits(): Promise<Signal[]> {
@@ -3541,7 +3611,22 @@ Response format:
   }
 
   private async persist(): Promise<void> {
-    await this.ctx.storage.put("state", this.state);
+    this.sanitizePersistedSocialState(Date.now());
+    try {
+      await this.ctx.storage.put("state", this.state);
+    } catch (error) {
+      // Emergency compaction: keep the agent alive even if an unexpectedly-large payload would otherwise
+      // brick persistence. We drop derived/cached social structures (they will be rebuilt on the next gather)
+      // and keep only a small tail of logs, then retry once.
+      console.log("[MahoragaHarness] WARNING: Persist failed, compacting state and retrying", String(error));
+
+      this.state.socialHistory = {};
+      this.state.socialSnapshotCache = capByVolumeKeepingPinnedRecord({}, SOCIAL_SNAPSHOT_CACHE_MAX_SYMBOLS);
+      this.state.socialSnapshotCacheUpdatedAt = 0;
+      this.state.logs = this.state.logs.slice(-100);
+
+      await this.ctx.storage.put("state", this.state);
+    }
   }
 
   private jsonResponse(data: unknown): Response {

@@ -139,12 +139,12 @@ describe("AgentConfigSchema", () => {
     });
 
     it("rejects market_open_execute_window_minutes outside 0-10", () => {
-      expect(AgentConfigSchema.safeParse({ ...createValidConfig(), market_open_execute_window_minutes: -1 }).success).toBe(
-        false
-      );
-      expect(AgentConfigSchema.safeParse({ ...createValidConfig(), market_open_execute_window_minutes: 11 }).success).toBe(
-        false
-      );
+      expect(
+        AgentConfigSchema.safeParse({ ...createValidConfig(), market_open_execute_window_minutes: -1 }).success
+      ).toBe(false);
+      expect(
+        AgentConfigSchema.safeParse({ ...createValidConfig(), market_open_execute_window_minutes: 11 }).success
+      ).toBe(false);
     });
 
     it("rejects stop_loss_pct over 50", () => {
