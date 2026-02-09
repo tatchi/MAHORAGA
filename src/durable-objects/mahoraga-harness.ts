@@ -739,7 +739,7 @@ function calculateTimeDecay(postTimestamp: number): number {
 
 function getEngagementMultiplier(upvotes: number, comments: number): number {
   let upvoteMultiplier = 0.8;
-  const upvoteThresholds = Object.entries(SOURCE_CONFIG.engagement.upvotes).sort(([a], [b]) => Number(b) - Number(a));
+  const upvoteThresholds = Object.entries(SOURCE_CONFIG.engagement.upvotes).toSorted(([a], [b]) => Number(b) - Number(a));
   for (const [threshold, mult] of upvoteThresholds) {
     if (upvotes >= parseInt(threshold, 10)) {
       upvoteMultiplier = mult;
@@ -748,7 +748,7 @@ function getEngagementMultiplier(upvotes: number, comments: number): number {
   }
 
   let commentMultiplier = 0.9;
-  const commentThresholds = Object.entries(SOURCE_CONFIG.engagement.comments).sort(([a], [b]) => Number(b) - Number(a));
+  const commentThresholds = Object.entries(SOURCE_CONFIG.engagement.comments).toSorted(([a], [b]) => Number(b) - Number(a));
   for (const [threshold, mult] of commentThresholds) {
     if (comments >= parseInt(threshold, 10)) {
       commentMultiplier = mult;
@@ -1383,10 +1383,7 @@ export class MahoragaHarness extends DurableObject<Env> {
     }
     this.state.socialSnapshotCacheUpdatedAt = now;
 
-    const freshSignals = eligibleSignals
-      .slice()
-      .sort((a, b) => Math.abs(b.sentiment) - Math.abs(a.sentiment))
-      .slice(0, MAX_SIGNALS);
+    const freshSignals = eligibleSignals.toSorted((a, b) => Math.abs(b.sentiment) - Math.abs(a.sentiment)).slice(0, MAX_SIGNALS);
 
     this.state.signalCache = freshSignals;
     this.state.lastDataGatherRun = now;
@@ -1438,8 +1435,7 @@ export class MahoragaHarness extends DurableObject<Env> {
   private pruneSocialHistoryInPlace(history: SocialHistoryEntry[], cutoffMs: number): void {
     if (history.length === 0) return;
 
-    const pruned = history.filter((entry) => entry.timestamp >= cutoffMs);
-    pruned.sort((a, b) => a.timestamp - b.timestamp);
+    const pruned = history.filter((entry) => entry.timestamp >= cutoffMs).toSorted((a, b) => a.timestamp - b.timestamp);
     history.splice(0, history.length, ...pruned);
   }
 
@@ -1454,8 +1450,7 @@ export class MahoragaHarness extends DurableObject<Env> {
     const touchedSymbols = new Set<string>();
     for (const [symbol, s] of snapshot) {
       touchedSymbols.add(symbol);
-      const history = this.state.socialHistory[symbol] ?? [];
-      if (history.length > 1) history.sort((a, b) => a.timestamp - b.timestamp);
+      const history = (this.state.socialHistory[symbol] ?? []).toSorted((a, b) => a.timestamp - b.timestamp);
       const last = history[history.length - 1];
 
       if (last && nowMs - last.timestamp < SOCIAL_HISTORY_BUCKET_MS) {
@@ -1989,7 +1984,7 @@ export class MahoragaHarness extends DurableObject<Env> {
       .filter((s) => s.isCrypto)
       .filter((s) => !heldCrypto.has(s.symbol))
       .filter((s) => s.sentiment > 0)
-      .sort((a, b) => (b.momentum || 0) - (a.momentum || 0));
+      .toSorted((a, b) => (b.momentum || 0) - (a.momentum || 0));
 
     for (const signal of cryptoSignals.slice(0, 2)) {
       if (cryptoPositions.length >= maxCryptoPositions) break;
@@ -2548,7 +2543,7 @@ JSON response:
     const notHeld = allSignals.filter((s) => !heldSymbols.has(s.symbol));
     // Use raw_sentiment for threshold (before weighting), weighted sentiment for sorting
     const aboveThreshold = notHeld.filter((s) => s.raw_sentiment >= this.state.config.min_sentiment_score);
-    const candidates = aboveThreshold.sort((a, b) => b.sentiment - a.sentiment).slice(0, limit);
+    const candidates = aboveThreshold.toSorted((a, b) => b.sentiment - a.sentiment).slice(0, limit);
 
     if (candidates.length === 0) {
       this.log("SignalResearch", "no_candidates", {
@@ -2684,7 +2679,7 @@ Provide a brief risk assessment and recommendation (HOLD, SELL, or ADD). JSON fo
     const candidates = Array.from(aggregated.values())
       .map((a) => ({ ...a, avgSentiment: a.totalSentiment / a.count }))
       .filter((a) => a.avgSentiment >= this.state.config.min_sentiment_score * 0.5)
-      .sort((a, b) => b.avgSentiment - a.avgSentiment)
+      .toSorted((a, b) => b.avgSentiment - a.avgSentiment)
       .slice(0, 10);
 
     if (candidates.length === 0) {
@@ -2866,7 +2861,7 @@ Response format:
       const researchedBuys = Object.values(this.state.signalResearch)
         .filter((r) => r.verdict === "BUY" && r.confidence >= this.state.config.min_analyst_confidence)
         .filter((r) => !heldSymbols.has(r.symbol))
-        .sort((a, b) => b.confidence - a.confidence);
+        .toSorted((a, b) => b.confidence - a.confidence);
 
       for (const research of researchedBuys.slice(0, 3)) {
         if (positions.length >= this.state.config.max_positions) break;
@@ -3252,7 +3247,7 @@ Response format:
 
       const sortedContracts = contracts
         .filter((c) => c.strike > 0)
-        .sort((a, b) => Math.abs(a.strike - targetStrike) - Math.abs(b.strike - targetStrike));
+        .toSorted((a, b) => Math.abs(a.strike - targetStrike) - Math.abs(b.strike - targetStrike));
 
       for (const contract of sortedContracts.slice(0, 5)) {
         const snapshot = await alpaca.options.getSnapshot(contract.symbol);

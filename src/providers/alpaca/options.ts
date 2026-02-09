@@ -164,7 +164,7 @@ export class AlpacaOptionsProvider implements OptionsProvider {
     }
 
     // Sort by date
-    return Array.from(expirations).sort();
+    return Array.from(expirations).toSorted();
   }
 
   /**
@@ -190,14 +190,14 @@ export class AlpacaOptionsProvider implements OptionsProvider {
     }
 
     // Sort by strike price
-    calls.sort((a, b) => a.strike - b.strike);
-    puts.sort((a, b) => a.strike - b.strike);
+    const sortedCalls = calls.toSorted((a, b) => a.strike - b.strike);
+    const sortedPuts = puts.toSorted((a, b) => a.strike - b.strike);
 
     return {
       symbol: underlying.toUpperCase(),
       expiration,
-      calls,
-      puts,
+      calls: sortedCalls,
+      puts: sortedPuts,
     };
   }
 
@@ -357,7 +357,7 @@ export class AlpacaOptionsProvider implements OptionsProvider {
 
     // If looking for nearest to a specific strike, sort by distance
     if (options.nearestToStrike !== undefined) {
-      contracts.sort((a, b) => {
+      return contracts.toSorted((a, b) => {
         const distA = Math.abs(a.strike - options.nearestToStrike!);
         const distB = Math.abs(b.strike - options.nearestToStrike!);
         return distA - distB;
