@@ -1160,11 +1160,11 @@ export class MahoragaMcpAgent extends McpAgent<Env> {
             change_pct: ((snap.daily_bar.c - snap.prev_daily_bar.c) / snap.prev_daily_bar.c) * 100,
             volume: snap.daily_bar.v,
           }));
-          movers.sort((a, b) => b.change_pct - a.change_pct);
-          const gainers = movers.filter((m) => m.change_pct > 0).slice(0, 10);
-          const losers = movers
+          const moversSorted = movers.toSorted((a, b) => b.change_pct - a.change_pct);
+          const gainers = moversSorted.filter((m) => m.change_pct > 0).slice(0, 10);
+          const losers = moversSorted
             .filter((m) => m.change_pct < 0)
-            .sort((a, b) => a.change_pct - b.change_pct)
+            .toSorted((a, b) => a.change_pct - b.change_pct)
             .slice(0, 10);
           return { content: [{ type: "text" as const, text: JSON.stringify(success({ gainers, losers }), null, 2) }] };
         } catch (error) {

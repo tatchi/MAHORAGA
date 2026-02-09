@@ -696,7 +696,7 @@ export default function App() {
                   <div className="text-hud-text-dim text-sm py-4 text-center">Researching candidates...</div>
                 ) : (
                   Object.entries(status?.signalResearch || {})
-                    .sort(([, a], [, b]) => b.timestamp - a.timestamp)
+                    .toSorted(([, a], [, b]) => b.timestamp - a.timestamp)
                     .map(([symbol, research]: [string, SignalResearch]) => (
                     <Tooltip
                       key={symbol}

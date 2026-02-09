@@ -11,7 +11,7 @@ export function nowISO(): string {
 }
 
 export function hashObject(obj: unknown): string {
-  const str = JSON.stringify(obj, Object.keys(obj as object).sort());
+  const str = JSON.stringify(obj, Object.keys(obj as object).toSorted());
   return simpleHash(str);
 }
 

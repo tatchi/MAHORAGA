@@ -40,6 +40,7 @@ import type { Env } from "../env.d";
 import { createAlpacaProviders } from "../providers/alpaca";
 import { createLLMProvider } from "../providers/llm/factory";
 import type { Account, LLMProvider, MarketClock, Position } from "../providers/types";
+import { capByVolumeKeepingPinnedMap, capByVolumeKeepingPinnedRecord } from "./social-bounds";
 
 // ============================================================================
 // SECTION 1: TYPES & CONFIGURATION
@@ -152,6 +153,12 @@ interface SocialHistoryEntry {
   sentiment: number;
 }
 
+interface SocialSnapshotCacheEntry {
+  volume: number;
+  sentiment: number;
+  sources: string[];
+}
+
 interface LogEntry {
   timestamp: string;
   agent: string;
@@ -205,6 +212,11 @@ interface AgentState {
   signalCache: Signal[];
   positionEntries: Record<string, PositionEntry>;
   socialHistory: Record<string, SocialHistoryEntry[]>;
+  // Cached aggregated social snapshot from the gathered signal set (age-filtered and volume-capped).
+  // Needed because `signalCache` is intentionally capped (and sorted by abs(sentiment)) which can drop
+  // otherwise-relevant symbols and incorrectly treat their current social volume as 0.
+  socialSnapshotCache: Record<string, SocialSnapshotCacheEntry>;
+  socialSnapshotCacheUpdatedAt: number;
   logs: LogEntry[];
   costTracker: CostTracker;
   lastDataGatherRun: number;
@@ -317,6 +329,8 @@ const DEFAULT_STATE: AgentState = {
   signalCache: [],
   positionEntries: {},
   socialHistory: {},
+  socialSnapshotCache: {},
+  socialSnapshotCacheUpdatedAt: 0,
   logs: [],
   costTracker: { total_usd: 0, calls: 0, tokens_in: 0, tokens_out: 0 },
   lastDataGatherRun: 0,
@@ -335,6 +349,17 @@ const DEFAULT_STATE: AgentState = {
   lastClockIsOpen: null,
   enabled: false,
 };
+
+// NOTE: Durable Object storage writes for the single `state` value can fail if the payload grows too large.
+// The social snapshot/history structures are especially prone to blow-up when the gatherers observe many symbols
+// (e.g., broad Reddit extraction across multiple subreddits). A failed `put("state", ...)` can effectively
+// "brick" the agent across restarts because it can no longer persist progress/config changes.
+//
+// Strategy:
+// - Persist `socialSnapshotCache` as: (all held symbols) + (top-N by volume), capped by `SOCIAL_SNAPSHOT_CACHE_MAX_SYMBOLS`.
+// - Persist `socialHistory` only for held symbols (24h window), since that's what staleness tracking actually needs.
+const SOCIAL_SNAPSHOT_CACHE_MAX_SYMBOLS = 250;
+const SOCIAL_HISTORY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 // Blacklist for ticker extraction - common English words and trading slang
 const TICKER_BLACKLIST = new Set([
@@ -726,7 +751,9 @@ function calculateTimeDecay(postTimestamp: number): number {
 
 function getEngagementMultiplier(upvotes: number, comments: number): number {
   let upvoteMultiplier = 0.8;
-  const upvoteThresholds = Object.entries(SOURCE_CONFIG.engagement.upvotes).sort(([a], [b]) => Number(b) - Number(a));
+  const upvoteThresholds = Object.entries(SOURCE_CONFIG.engagement.upvotes).toSorted(
+    ([a], [b]) => Number(b) - Number(a)
+  );
   for (const [threshold, mult] of upvoteThresholds) {
     if (upvotes >= parseInt(threshold, 10)) {
       upvoteMultiplier = mult;
@@ -735,7 +762,9 @@ function getEngagementMultiplier(upvotes: number, comments: number): number {
   }
 
   let commentMultiplier = 0.9;
-  const commentThresholds = Object.entries(SOURCE_CONFIG.engagement.comments).sort(([a], [b]) => Number(b) - Number(a));
+  const commentThresholds = Object.entries(SOURCE_CONFIG.engagement.comments).toSorted(
+    ([a], [b]) => Number(b) - Number(a)
+  );
   for (const [threshold, mult] of commentThresholds) {
     if (comments >= parseInt(threshold, 10)) {
       commentMultiplier = mult;
@@ -854,6 +883,7 @@ export class MahoragaHarness extends DurableObject<Env> {
         this.state = { ...DEFAULT_STATE, ...stored };
         this.state.config = { ...DEFAULT_STATE.config, ...this.state.config };
       }
+      this.sanitizePersistedSocialState(Date.now());
       this.initializeLLM();
 
       // Reschedule alarm if stale - in local dev, past alarms don't fire on restart;
@@ -941,7 +971,9 @@ export class MahoragaHarness extends DurableObject<Env> {
     try {
       const alpaca = createAlpacaProviders(this.env);
       const clock = await alpaca.trading.getClock();
-      const clockNowMs = Number.isFinite(new Date(clock.timestamp).getTime()) ? new Date(clock.timestamp).getTime() : now;
+      const clockNowMs = Number.isFinite(new Date(clock.timestamp).getTime())
+        ? new Date(clock.timestamp).getTime()
+        : now;
       const etDay = this.getEtDayString(clockNowMs);
       const nextOpenMs = new Date(clock.next_open).getTime();
       const nextOpenValid = Number.isFinite(nextOpenMs);
@@ -952,29 +984,32 @@ export class MahoragaHarness extends DurableObject<Env> {
 
       if (now - this.state.lastDataGatherRun >= this.state.config.data_poll_interval_ms) {
         await this.runDataGatherers();
-        this.state.lastDataGatherRun = now;
       }
 
-	      if (now - this.state.lastResearchRun >= RESEARCH_INTERVAL_MS) {
-	        await this.researchTopSignals(5);
-	        this.state.lastResearchRun = now;
-	      }
+      if (now - this.state.lastResearchRun >= RESEARCH_INTERVAL_MS) {
+        await this.researchTopSignals(5);
+        this.state.lastResearchRun = now;
+      }
 
-	      if (this.state.premarketPlan && this.state.lastPremarketPlanDayEt && this.state.lastPremarketPlanDayEt !== etDay) {
-	        this.log("System", "clearing_stale_premarket_plan", {
-	          stale_day: this.state.lastPremarketPlanDayEt,
-	          current_day: etDay,
-	        });
-	        this.state.premarketPlan = null;
-	        this.state.lastPremarketPlanDayEt = null;
-	      }
+      if (
+        this.state.premarketPlan &&
+        this.state.lastPremarketPlanDayEt &&
+        this.state.lastPremarketPlanDayEt !== etDay
+      ) {
+        this.log("System", "clearing_stale_premarket_plan", {
+          stale_day: this.state.lastPremarketPlanDayEt,
+          current_day: etDay,
+        });
+        this.state.premarketPlan = null;
+        this.state.lastPremarketPlanDayEt = null;
+      }
 
-	      if (!clock.is_open && !this.state.premarketPlan) {
-	        const minutesToOpen = nextOpenValid ? (nextOpenMs - clockNowMs) / 60000 : Number.POSITIVE_INFINITY;
-	        const shouldPlan =
-	          minutesToOpen > 0 &&
-	          minutesToOpen <= premarketPlanWindowMinutes &&
-	          this.state.lastPremarketPlanDayEt !== etDay;
+      if (!clock.is_open && !this.state.premarketPlan) {
+        const minutesToOpen = nextOpenValid ? (nextOpenMs - clockNowMs) / 60000 : Number.POSITIVE_INFINITY;
+        const shouldPlan =
+          minutesToOpen > 0 &&
+          minutesToOpen <= premarketPlanWindowMinutes &&
+          this.state.lastPremarketPlanDayEt !== etDay;
 
         if (shouldPlan) {
           await this.runPreMarketAnalysis();
@@ -993,9 +1028,7 @@ export class MahoragaHarness extends DurableObject<Env> {
         const hasOpenMs = typeof lastKnownOpenMs === "number" && Number.isFinite(lastKnownOpenMs);
         const openWindowMs = marketOpenExecuteWindowMinutes * 60_000;
         const withinOpenWindow =
-          hasOpenMs &&
-          clockNowMs >= lastKnownOpenMs &&
-          clockNowMs - lastKnownOpenMs <= openWindowMs;
+          hasOpenMs && clockNowMs >= lastKnownOpenMs && clockNowMs - lastKnownOpenMs <= openWindowMs;
         const clockStateUnknown = this.state.lastClockIsOpen == null;
         const marketJustOpened = this.state.lastClockIsOpen === false && clock.is_open;
 
@@ -1005,13 +1038,13 @@ export class MahoragaHarness extends DurableObject<Env> {
         // Fallback behavior: if we don't have an open timestamp (e.g., first tick after a deploy/migration),
         // avoid using a potentially-wrong edge detector. Instead:
         // - execute on the true "closed -> open" edge when we have prior state, or
-	        // - if the prior state is unknown, allow a single attempt and rely on plan staleness to prevent late execution.
-	        const shouldExecutePremarketPlan =
-	          !!this.state.premarketPlan &&
-	          ((hasOpenMs && withinOpenWindow) || marketJustOpened || (!hasOpenMs && clockStateUnknown));
-	        if (shouldExecutePremarketPlan) {
-	          await this.executePremarketPlan();
-	        }
+        // - if the prior state is unknown, allow a single attempt and rely on plan staleness to prevent late execution.
+        const shouldExecutePremarketPlan =
+          !!this.state.premarketPlan &&
+          ((hasOpenMs && withinOpenWindow) || marketJustOpened || (!hasOpenMs && clockStateUnknown));
+        if (shouldExecutePremarketPlan) {
+          await this.executePremarketPlan();
+        }
 
         if (now - this.state.lastAnalystRun >= this.state.config.analyst_interval_ms) {
           await this.runAnalyst();
@@ -1355,12 +1388,44 @@ export class MahoragaHarness extends DurableObject<Env> {
     const MAX_AGE_MS = 24 * 60 * 60 * 1000;
     const now = Date.now();
 
-    const freshSignals = allSignals
-      .filter((s) => now - s.timestamp < MAX_AGE_MS)
-      .sort((a, b) => Math.abs(b.sentiment) - Math.abs(a.sentiment))
+    const eligibleSignals = allSignals.filter((s) => now - s.timestamp < MAX_AGE_MS);
+
+    // Build staleness/entry metrics from the full eligible set before capping signals.
+    // This avoids "social volume == 0" for symbols that were gathered but filtered out by the cap.
+    const socialSnapshotFull = this.buildSocialSnapshot(eligibleSignals);
+
+    // Bound persisted social state to avoid Durable Object storage failures when the gatherers return many symbols.
+    // - Snapshot cache: keep pinned (held) symbols + top-N by volume (used for staleness + entry metadata)
+    // - Social history: keep only pinned (held) symbols (the only ones we use for ongoing staleness tracking)
+    const pinnedSymbols = Object.keys(this.state.positionEntries || {});
+    const pinnedSet = new Set(pinnedSymbols);
+
+    const socialSnapshotCapped = capByVolumeKeepingPinnedMap(
+      socialSnapshotFull,
+      SOCIAL_SNAPSHOT_CACHE_MAX_SYMBOLS,
+      pinnedSymbols
+    );
+
+    // Only update history for held symbols; histories for non-held symbols are intentionally not persisted.
+    // This keeps DO state bounded without affecting the trading logic that uses history (staleness for held positions).
+    const historySnapshot = new Map(Array.from(socialSnapshotFull).filter(([symbol]) => pinnedSet.has(symbol)));
+    this.updateSocialHistoryFromSnapshot(historySnapshot, now);
+    this.state.socialSnapshotCache = {};
+    for (const [symbol, s] of socialSnapshotCapped) {
+      this.state.socialSnapshotCache[symbol] = {
+        volume: s.volume,
+        sentiment: s.sentiment,
+        sources: Array.from(s.sources),
+      };
+    }
+    this.state.socialSnapshotCacheUpdatedAt = now;
+
+    const freshSignals = eligibleSignals
+      .toSorted((a, b) => Math.abs(b.sentiment) - Math.abs(a.sentiment))
       .slice(0, MAX_SIGNALS);
 
     this.state.signalCache = freshSignals;
+    this.state.lastDataGatherRun = now;
 
     this.log("System", "data_gathered", {
       stocktwits: stocktwitsSignals.length,
@@ -1369,6 +1434,141 @@ export class MahoragaHarness extends DurableObject<Env> {
       sec: secSignals.length,
       total: this.state.signalCache.length,
     });
+  }
+
+  private buildSocialSnapshot(signals: Signal[]): Map<
+    string,
+    {
+      volume: number;
+      sentiment: number;
+      sources: Set<string>;
+    }
+  > {
+    const aggregated = new Map<string, { volume: number; sentimentNumerator: number; sources: Set<string> }>();
+
+    for (const sig of signals) {
+      if (!sig.symbol) continue;
+      const volume = Number.isFinite(sig.volume) && sig.volume > 0 ? sig.volume : 1;
+
+      let entry = aggregated.get(sig.symbol);
+      if (!entry) {
+        entry = { volume: 0, sentimentNumerator: 0, sources: new Set() };
+        aggregated.set(sig.symbol, entry);
+      }
+      entry.volume += volume;
+      entry.sentimentNumerator += (Number.isFinite(sig.sentiment) ? sig.sentiment : 0) * volume;
+      entry.sources.add(sig.source_detail || sig.source);
+    }
+
+    const out = new Map<string, { volume: number; sentiment: number; sources: Set<string> }>();
+    for (const [symbol, entry] of aggregated) {
+      out.set(symbol, {
+        volume: entry.volume,
+        sentiment: entry.volume > 0 ? entry.sentimentNumerator / entry.volume : 0,
+        sources: entry.sources,
+      });
+    }
+    return out;
+  }
+
+  private pruneSocialHistoryInPlace(history: SocialHistoryEntry[], cutoffMs: number): void {
+    if (history.length === 0) return;
+
+    const pruned = history.filter((entry) => entry.timestamp >= cutoffMs).toSorted((a, b) => a.timestamp - b.timestamp);
+    history.splice(0, history.length, ...pruned);
+  }
+
+  private updateSocialHistoryFromSnapshot(
+    snapshot: Map<string, { volume: number; sentiment: number; sources: Set<string> }>,
+    nowMs: number
+  ): void {
+    const SOCIAL_HISTORY_BUCKET_MS = 5 * 60 * 1000;
+    const cutoff = nowMs - SOCIAL_HISTORY_MAX_AGE_MS;
+
+    const touchedSymbols = new Set<string>();
+    for (const [symbol, s] of snapshot) {
+      touchedSymbols.add(symbol);
+      const history = (this.state.socialHistory[symbol] ?? []).toSorted((a, b) => a.timestamp - b.timestamp);
+      const last = history[history.length - 1];
+
+      if (last && nowMs - last.timestamp < SOCIAL_HISTORY_BUCKET_MS) {
+        last.timestamp = nowMs;
+        last.volume = s.volume;
+        last.sentiment = s.sentiment;
+      } else {
+        history.push({ timestamp: nowMs, volume: s.volume, sentiment: s.sentiment });
+      }
+
+      this.pruneSocialHistoryInPlace(history, cutoff);
+      if (history.length === 0) {
+        delete this.state.socialHistory[symbol];
+      } else {
+        this.state.socialHistory[symbol] = history;
+      }
+    }
+
+    // Also prune stale histories for symbols that are missing from the latest snapshot,
+    // otherwise durable-object state can grow without bound over time.
+    for (const symbol of Object.keys(this.state.socialHistory)) {
+      if (touchedSymbols.has(symbol)) continue;
+      const history = this.state.socialHistory[symbol];
+      if (!history || history.length === 0) {
+        delete this.state.socialHistory[symbol];
+        continue;
+      }
+      this.pruneSocialHistoryInPlace(history, cutoff);
+      if (history.length === 0) {
+        delete this.state.socialHistory[symbol];
+      }
+    }
+  }
+
+  private getSocialSnapshotCache(): Record<string, SocialSnapshotCacheEntry> {
+    // Prefer the snapshot captured during the most recent gather run. This represents the full gathered set
+    // (age-filtered and volume-capped), while `signalCache` is capped and sentiment-biased for research/LLM costs.
+    if (this.state.socialSnapshotCacheUpdatedAt > 0) {
+      return this.state.socialSnapshotCache;
+    }
+
+    // Backfill for older persisted states that predate socialSnapshotCache.
+    const fallback = this.buildSocialSnapshot(this.state.signalCache);
+    const out: Record<string, SocialSnapshotCacheEntry> = {};
+    for (const [symbol, s] of fallback) {
+      out[symbol] = { volume: s.volume, sentiment: s.sentiment, sources: Array.from(s.sources) };
+    }
+    return out;
+  }
+
+  private sanitizePersistedSocialState(nowMs: number): void {
+    // Called on startup (after loading persisted state) and before every persist.
+    // This ensures we never carry forward unbounded social caches that could make future writes fail.
+    const pinnedSymbols = Object.keys(this.state.positionEntries || {});
+    const pinnedSet = new Set(pinnedSymbols);
+
+    this.state.socialSnapshotCache = capByVolumeKeepingPinnedRecord(
+      this.state.socialSnapshotCache ?? {},
+      SOCIAL_SNAPSHOT_CACHE_MAX_SYMBOLS,
+      pinnedSymbols
+    );
+
+    // Keep social history only for held symbols to prevent unbounded state growth.
+    const cutoff = nowMs - SOCIAL_HISTORY_MAX_AGE_MS;
+    for (const symbol of Object.keys(this.state.socialHistory ?? {})) {
+      if (!pinnedSet.has(symbol)) {
+        // Not held => delete entirely (we don't need history for non-held symbols).
+        delete this.state.socialHistory[symbol];
+        continue;
+      }
+      const history = this.state.socialHistory[symbol];
+      if (!history || history.length === 0) {
+        delete this.state.socialHistory[symbol];
+        continue;
+      }
+      this.pruneSocialHistoryInPlace(history, cutoff);
+      if (history.length === 0) {
+        delete this.state.socialHistory[symbol];
+      }
+    }
   }
 
   private async gatherStockTwits(): Promise<Signal[]> {
@@ -1854,7 +2054,7 @@ export class MahoragaHarness extends DurableObject<Env> {
       .filter((s) => s.isCrypto)
       .filter((s) => !heldCrypto.has(s.symbol))
       .filter((s) => s.sentiment > 0)
-      .sort((a, b) => (b.momentum || 0) - (a.momentum || 0));
+      .toSorted((a, b) => (b.momentum || 0) - (a.momentum || 0));
 
     for (const signal of cryptoSignals.slice(0, 2)) {
       if (cryptoPositions.length >= maxCryptoPositions) break;
@@ -2413,7 +2613,7 @@ JSON response:
     const notHeld = allSignals.filter((s) => !heldSymbols.has(s.symbol));
     // Use raw_sentiment for threshold (before weighting), weighted sentiment for sorting
     const aboveThreshold = notHeld.filter((s) => s.raw_sentiment >= this.state.config.min_sentiment_score);
-    const candidates = aboveThreshold.sort((a, b) => b.sentiment - a.sentiment).slice(0, limit);
+    const candidates = aboveThreshold.toSorted((a, b) => b.sentiment - a.sentiment).slice(0, limit);
 
     if (candidates.length === 0) {
       this.log("SignalResearch", "no_candidates", {
@@ -2549,7 +2749,7 @@ Provide a brief risk assessment and recommendation (HOLD, SELL, or ADD). JSON fo
     const candidates = Array.from(aggregated.values())
       .map((a) => ({ ...a, avgSentiment: a.totalSentiment / a.count }))
       .filter((a) => a.avgSentiment >= this.state.config.min_sentiment_score * 0.5)
-      .sort((a, b) => b.avgSentiment - a.avgSentiment)
+      .toSorted((a, b) => b.avgSentiment - a.avgSentiment)
       .slice(0, 10);
 
     if (candidates.length === 0) {
@@ -2695,6 +2895,7 @@ Response format:
     }
 
     const heldSymbols = new Set(positions.map((p) => p.symbol));
+    const socialSnapshot = this.getSocialSnapshotCache();
 
     // Check position exits
     for (const pos of positions) {
@@ -2716,7 +2917,8 @@ Response format:
 
       // Check staleness
       if (this.state.config.stale_position_enabled) {
-        const stalenessResult = this.analyzeStaleness(pos.symbol, pos.current_price, 0);
+        const currentSocialVolume = socialSnapshot[pos.symbol]?.volume ?? 0;
+        const stalenessResult = this.analyzeStaleness(pos.symbol, pos.current_price, currentSocialVolume);
         this.state.stalenessAnalysis[pos.symbol] = stalenessResult;
 
         if (stalenessResult.isStale) {
@@ -2729,13 +2931,14 @@ Response format:
       const researchedBuys = Object.values(this.state.signalResearch)
         .filter((r) => r.verdict === "BUY" && r.confidence >= this.state.config.min_analyst_confidence)
         .filter((r) => !heldSymbols.has(r.symbol))
-        .sort((a, b) => b.confidence - a.confidence);
+        .toSorted((a, b) => b.confidence - a.confidence);
 
       for (const research of researchedBuys.slice(0, 3)) {
         if (positions.length >= this.state.config.max_positions) break;
         if (heldSymbols.has(research.symbol)) continue;
 
         const originalSignal = this.state.signalCache.find((s) => s.symbol === research.symbol);
+        const aggregatedSocial = socialSnapshot[research.symbol];
         let finalConfidence = research.confidence;
 
         if (this.isTwitterEnabled() && originalSignal) {
@@ -2772,12 +2975,14 @@ Response format:
             symbol: research.symbol,
             entry_time: Date.now(),
             entry_price: 0,
-            entry_sentiment: originalSignal?.sentiment || finalConfidence,
-            entry_social_volume: originalSignal?.volume || 0,
-            entry_sources: originalSignal?.subreddits || [originalSignal?.source || "research"],
+            entry_sentiment: aggregatedSocial?.sentiment ?? originalSignal?.sentiment ?? finalConfidence,
+            entry_social_volume: aggregatedSocial?.volume ?? originalSignal?.volume ?? 0,
+            entry_sources: aggregatedSocial
+              ? aggregatedSocial.sources
+              : originalSignal?.subreddits || [originalSignal?.source || "research"],
             entry_reason: research.reasoning,
             peak_price: 0,
-            peak_sentiment: originalSignal?.sentiment || finalConfidence,
+            peak_sentiment: aggregatedSocial?.sentiment ?? originalSignal?.sentiment ?? finalConfidence,
           };
         }
       }
@@ -2823,17 +3028,20 @@ Response format:
           const result = await this.executeBuy(alpaca, rec.symbol, rec.confidence, account);
           if (result) {
             const originalSignal = this.state.signalCache.find((s) => s.symbol === rec.symbol);
+            const aggregatedSocial = socialSnapshot[rec.symbol];
             heldSymbols.add(rec.symbol);
             this.state.positionEntries[rec.symbol] = {
               symbol: rec.symbol,
               entry_time: Date.now(),
               entry_price: 0,
-              entry_sentiment: originalSignal?.sentiment || rec.confidence,
-              entry_social_volume: originalSignal?.volume || 0,
-              entry_sources: originalSignal?.subreddits || [originalSignal?.source || "analyst"],
+              entry_sentiment: aggregatedSocial?.sentiment ?? originalSignal?.sentiment ?? rec.confidence,
+              entry_social_volume: aggregatedSocial?.volume ?? originalSignal?.volume ?? 0,
+              entry_sources: aggregatedSocial
+                ? aggregatedSocial.sources
+                : originalSignal?.subreddits || [originalSignal?.source || "analyst"],
               entry_reason: rec.reasoning,
               peak_price: 0,
-              peak_sentiment: originalSignal?.sentiment || rec.confidence,
+              peak_sentiment: aggregatedSocial?.sentiment ?? originalSignal?.sentiment ?? rec.confidence,
             };
           }
         }
@@ -3109,7 +3317,7 @@ Response format:
 
       const sortedContracts = contracts
         .filter((c) => c.strike > 0)
-        .sort((a, b) => Math.abs(a.strike - targetStrike) - Math.abs(b.strike - targetStrike));
+        .toSorted((a, b) => Math.abs(a.strike - targetStrike) - Math.abs(b.strike - targetStrike));
 
       for (const contract of sortedContracts.slice(0, 5)) {
         const snapshot = await alpaca.options.getSnapshot(contract.symbol);
@@ -3317,6 +3525,7 @@ Response format:
     if (!account) return;
 
     const heldSymbols = new Set(positions.map((p) => p.symbol));
+    const socialSnapshot = this.getSocialSnapshotCache();
 
     this.log("System", "executing_premarket_plan", {
       recommendations: this.state.premarketPlan.recommendations.length,
@@ -3338,16 +3547,19 @@ Response format:
           heldSymbols.add(rec.symbol);
 
           const originalSignal = this.state.signalCache.find((s) => s.symbol === rec.symbol);
+          const aggregatedSocial = socialSnapshot[rec.symbol];
           this.state.positionEntries[rec.symbol] = {
             symbol: rec.symbol,
             entry_time: Date.now(),
             entry_price: 0,
-            entry_sentiment: originalSignal?.sentiment || 0,
-            entry_social_volume: originalSignal?.volume || 0,
-            entry_sources: originalSignal?.subreddits || [originalSignal?.source || "premarket"],
+            entry_sentiment: aggregatedSocial?.sentiment ?? originalSignal?.sentiment ?? 0,
+            entry_social_volume: aggregatedSocial?.volume ?? originalSignal?.volume ?? 0,
+            entry_sources: aggregatedSocial
+              ? aggregatedSocial.sources
+              : originalSignal?.subreddits || [originalSignal?.source || "premarket"],
             entry_reason: rec.reasoning,
             peak_price: 0,
-            peak_sentiment: originalSignal?.sentiment || 0,
+            peak_sentiment: aggregatedSocial?.sentiment ?? originalSignal?.sentiment ?? 0,
           };
         }
       }
@@ -3399,7 +3611,22 @@ Response format:
   }
 
   private async persist(): Promise<void> {
-    await this.ctx.storage.put("state", this.state);
+    this.sanitizePersistedSocialState(Date.now());
+    try {
+      await this.ctx.storage.put("state", this.state);
+    } catch (error) {
+      // Emergency compaction: keep the agent alive even if an unexpectedly-large payload would otherwise
+      // brick persistence. We drop derived/cached social structures (they will be rebuilt on the next gather)
+      // and keep only a small tail of logs, then retry once.
+      console.log("[MahoragaHarness] WARNING: Persist failed, compacting state and retrying", String(error));
+
+      this.state.socialHistory = {};
+      this.state.socialSnapshotCache = capByVolumeKeepingPinnedRecord({}, SOCIAL_SNAPSHOT_CACHE_MAX_SYMBOLS);
+      this.state.socialSnapshotCacheUpdatedAt = 0;
+      this.state.logs = this.state.logs.slice(-100);
+
+      await this.ctx.storage.put("state", this.state);
+    }
   }
 
   private jsonResponse(data: unknown): Response {
