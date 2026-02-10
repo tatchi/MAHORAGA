@@ -3279,9 +3279,16 @@ Response format:
           details: { symbol, trendTimeframe, error: String(error) },
         };
       }
-      const first = bars[0]!.c || bars[0]!.o;
-      const last = bars[bars.length - 1]!.c;
-      const retPct = first > 0 ? ((last - first) / first) * 100 : 0;
+      const first = bars[0]!.c ?? bars[0]!.o;
+      const last = bars[bars.length - 1]!.c ?? bars[bars.length - 1]!.o;
+      if (!Number.isFinite(first) || !Number.isFinite(last) || first <= 0 || last <= 0) {
+        return {
+          ok: false,
+          reason: "Trend bars invalid (missing/invalid prices)",
+          details: { symbol, trendTimeframe, first, last },
+        };
+      }
+      const retPct = ((last - first) / first) * 100;
       if (retPct < minTrendReturnPct) {
         return { ok: false, reason: "Trend not confirmed", details: { retPct, minTrendReturnPct, trendTimeframe } };
       }
@@ -3308,9 +3315,16 @@ Response format:
           details: { regimeSymbol, regimeTimeframe, barsCount: bars.length, requiredBars },
         };
       }
-      const first = bars[0]!.c || bars[0]!.o;
-      const last = bars[bars.length - 1]!.c;
-      const retPct = first > 0 ? ((last - first) / first) * 100 : 0;
+      const first = bars[0]!.c ?? bars[0]!.o;
+      const last = bars[bars.length - 1]!.c ?? bars[bars.length - 1]!.o;
+      if (!Number.isFinite(first) || !Number.isFinite(last) || first <= 0 || last <= 0) {
+        return {
+          ok: false,
+          reason: "Regime bars invalid (missing/invalid prices)",
+          details: { regimeSymbol, regimeTimeframe, first, last },
+        };
+      }
+      const retPct = ((last - first) / first) * 100;
       if (retPct < regimeMinReturnPct) {
         return {
           ok: false,
