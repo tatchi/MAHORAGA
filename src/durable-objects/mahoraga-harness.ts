@@ -1293,7 +1293,26 @@ export class MahoragaHarness extends DurableObject<Env> {
   private async handleGetHistory(url: URL): Promise<Response> {
     const alpaca = createAlpacaProviders(this.env);
     const period = url.searchParams.get("period") || "1M";
-    const timeframe = url.searchParams.get("timeframe") || "1D";
+    const rawTimeframe = (url.searchParams.get("timeframe") || "1D").trim();
+    const upperTimeframe = rawTimeframe.toUpperCase();
+    const timeframe =
+      upperTimeframe === "1D" || upperTimeframe === "1DAY"
+        ? "1D"
+        : upperTimeframe === "1H" || upperTimeframe === "1HOUR"
+          ? "1H"
+          : upperTimeframe === "1MIN"
+            ? "1Min"
+            : upperTimeframe === "5MIN"
+              ? "5Min"
+              : upperTimeframe === "15MIN"
+                ? "15Min"
+                : null;
+    if (!timeframe) {
+      return this.jsonResponse(
+        { ok: false, error: "Invalid timeframe (supported: 1Min, 5Min, 15Min, 1H, 1D)" },
+        { status: 400 }
+      );
+    }
     const intradayReporting = url.searchParams.get("intraday_reporting") as
       | "market_hours"
       | "extended_hours"
