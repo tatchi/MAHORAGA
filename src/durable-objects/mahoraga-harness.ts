@@ -912,14 +912,19 @@ export class MahoragaHarness extends DurableObject<Env> {
       const stored = await this.ctx.storage.get<AgentState>("state");
       if (stored) {
         this.state = { ...DEFAULT_STATE, ...stored };
-        this.state.config = { ...DEFAULT_STATE.config, ...this.state.config };
+        const rawStoredConfig = stored.config as unknown;
+        const storedConfig =
+          rawStoredConfig && typeof rawStoredConfig === "object" && !Array.isArray(rawStoredConfig)
+            ? (rawStoredConfig as Record<string, unknown>)
+            : {};
+        this.state.config = { ...DEFAULT_STATE.config, ...storedConfig };
       }
       const rawConfig = this.state.config as unknown;
       const candidateConfig =
         rawConfig && typeof rawConfig === "object" && !Array.isArray(rawConfig)
           ? (rawConfig as Record<string, unknown>)
           : {};
-      const validatedConfig = safeValidateAgentConfig(candidateConfig);
+      const validatedConfig = safeValidateAgentConfig({ ...DEFAULT_STATE.config, ...candidateConfig });
       if (validatedConfig.success) {
         this.state.config = validatedConfig.data as unknown as AgentConfig;
       } else {
@@ -3178,7 +3183,7 @@ Response format:
         }
       }
 
-      const applyGatesToCrypto = this.getConfigBoolean("entry_gates_apply_to_crypto", false);
+      const applyGatesToCrypto = this.state.config.entry_gates_apply_to_crypto;
       if (!isCrypto || applyGatesToCrypto) {
         const gate = await this.preTradeGates(alpaca, symbol, { isCrypto });
         if (!gate.ok) {
