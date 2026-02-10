@@ -40,6 +40,7 @@ import type { Env } from "../env.d";
 import { createAlpacaProviders } from "../providers/alpaca";
 import { createLLMProvider } from "../providers/llm/factory";
 import type { Account, LLMProvider, MarketClock, Position } from "../providers/types";
+import { safeValidateAgentConfig } from "../schemas/agent-config";
 import { capByVolumeKeepingPinnedMap, capByVolumeKeepingPinnedRecord } from "./social-bounds";
 
 // ============================================================================
@@ -913,6 +914,22 @@ export class MahoragaHarness extends DurableObject<Env> {
         this.state = { ...DEFAULT_STATE, ...stored };
         this.state.config = { ...DEFAULT_STATE.config, ...this.state.config };
       }
+      const rawConfig = this.state.config as unknown;
+      const candidateConfig =
+        rawConfig && typeof rawConfig === "object" && !Array.isArray(rawConfig)
+          ? (rawConfig as Record<string, unknown>)
+          : {};
+      const validatedConfig = safeValidateAgentConfig(candidateConfig);
+      if (validatedConfig.success) {
+        this.state.config = { ...candidateConfig, ...validatedConfig.data } as AgentConfig;
+      } else {
+        this.log("System", "config_invalid_reset", {
+          reason: "Persisted config failed schema validation; reset to defaults",
+          issues: validatedConfig.error.issues,
+        });
+        this.state.config = { ...candidateConfig, ...DEFAULT_STATE.config } as AgentConfig;
+        await this.persist();
+      }
       this.sanitizePersistedSocialState(Date.now());
       this.initializeLLM();
 
@@ -1301,8 +1318,25 @@ export class MahoragaHarness extends DurableObject<Env> {
   }
 
   private async handleUpdateConfig(request: Request): Promise<Response> {
-    const body = (await request.json()) as Partial<AgentConfig>;
-    this.state.config = { ...this.state.config, ...body };
+    const body = (await request.json().catch(() => null)) as unknown;
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      return new Response(JSON.stringify({ ok: false, error: "Invalid JSON body (expected object)" }, null, 2), {
+        status: 400,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    const candidate = {
+      ...(this.state.config as unknown as Record<string, unknown>),
+      ...(body as Record<string, unknown>),
+    };
+    const result = safeValidateAgentConfig(candidate);
+    if (!result.success) {
+      return new Response(JSON.stringify({ ok: false, issues: result.error.issues }, null, 2), {
+        status: 400,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    this.state.config = { ...candidate, ...result.data } as AgentConfig;
     this.initializeLLM();
     await this.persist();
     return this.jsonResponse({ ok: true, config: this.state.config });
