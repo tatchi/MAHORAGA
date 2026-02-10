@@ -1,6 +1,22 @@
 import { z } from "zod";
 
-const BarsTimeframeSchema = z.enum(["1Min", "5Min", "15Min", "1Hour", "1Day"]);
+const BarsTimeframeSchema = z.preprocess(
+  (value) => {
+    if (typeof value !== "string") {
+      return value;
+    }
+    const trimmed = value.trim();
+    const upper = trimmed.toUpperCase();
+    if (upper === "1D") {
+      return "1Day";
+    }
+    if (upper === "1H") {
+      return "1Hour";
+    }
+    return trimmed;
+  },
+  z.enum(["1Min", "5Min", "15Min", "1Hour", "1Day"])
+);
 
 export const AgentConfigSchema = z
   .object({

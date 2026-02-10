@@ -3139,236 +3139,246 @@ Response format:
     symbol: string,
     { isCrypto }: { isCrypto: boolean }
   ): Promise<{ ok: true } | { ok: false; reason: string; details?: Record<string, unknown> }> {
-    const config = this.state.config;
-    const minPrice = config.entry_min_price;
-    const minDollarVolume = config.entry_min_dollar_volume;
-    const maxSpreadBps = config.entry_max_spread_bps;
+    try {
+      const config = this.state.config;
+      const minPrice = config.entry_min_price;
+      const minDollarVolume = config.entry_min_dollar_volume;
+      const maxSpreadBps = config.entry_max_spread_bps;
 
-    const configuredTrendTimeframe = config.entry_trend_timeframe;
-    const configuredTrendLookbackBars = config.entry_trend_lookback_bars;
-    const trendTimeframe = isCrypto ? "1Day" : configuredTrendTimeframe;
-    const trendLookbackBars = isCrypto ? 2 : configuredTrendLookbackBars;
-    const minTrendReturnPct = config.entry_min_trend_return_pct;
+      const configuredTrendTimeframe = config.entry_trend_timeframe;
+      const configuredTrendLookbackBars = config.entry_trend_lookback_bars;
+      const trendTimeframe = isCrypto ? "1Day" : configuredTrendTimeframe;
+      const trendLookbackBars = isCrypto ? 2 : configuredTrendLookbackBars;
+      const minTrendReturnPct = config.entry_min_trend_return_pct;
 
-    const regimeEnabled = config.regime_filter_enabled;
-    const regimeSymbol = config.regime_symbol;
-    const regimeTimeframe = config.regime_timeframe;
-    const regimeLookbackBars = config.regime_lookback_bars;
-    const regimeMinReturnPct = config.regime_min_return_pct;
+      const regimeEnabled = config.regime_filter_enabled;
+      const regimeSymbol = config.regime_symbol;
+      const regimeTimeframe = config.regime_timeframe;
+      const regimeLookbackBars = config.regime_lookback_bars;
+      const regimeMinReturnPct = config.regime_min_return_pct;
 
-    const snapshotSymbol = isCrypto ? normalizeCryptoSymbol(symbol) : symbol;
-    let snapshotError: unknown = null;
-    const snapshot = await (isCrypto
-      ? alpaca.marketData.getCryptoSnapshot(snapshotSymbol)
-      : alpaca.marketData.getSnapshot(snapshotSymbol)
-    ).catch((error) => {
-      snapshotError = error;
-      return null;
-    });
-    if (!snapshot) {
-      return snapshotError
-        ? {
-            ok: false,
-            reason: "No market snapshot (market data error)",
-            details: { isCrypto, snapshotError: String(snapshotError) },
-          }
-        : { ok: false, reason: "No market snapshot (market data unavailable)", details: { isCrypto } };
-    }
-
-    const price =
-      snapshot.latest_trade?.price ?? snapshot.latest_quote?.ask_price ?? snapshot.latest_quote?.bid_price ?? 0;
-    if (!Number.isFinite(price) || price <= 0) {
-      return { ok: false, reason: "No valid price from snapshot" };
-    }
-
-    if (price < minPrice) {
-      return { ok: false, reason: "Price below minimum", details: { price, minPrice } };
-    }
-
-    const bid = snapshot.latest_quote?.bid_price ?? null;
-    const ask = snapshot.latest_quote?.ask_price ?? null;
-    const hasQuote =
-      typeof bid === "number" &&
-      Number.isFinite(bid) &&
-      bid > 0 &&
-      typeof ask === "number" &&
-      Number.isFinite(ask) &&
-      ask > 0;
-    if (!hasQuote && maxSpreadBps < 10_000) {
-      return {
-        ok: false,
-        reason: "Quote unavailable (spread gate)",
-        details: { bid, ask, maxSpreadBps, isCrypto },
-      };
-    }
-    if (hasQuote && ask < bid) {
-      return { ok: false, reason: "Invalid quote (ask below bid)", details: { bid, ask } };
-    }
-    const mid = hasQuote ? (bid + ask) / 2 : 0;
-    const spreadBps = hasQuote && mid > 0 ? ((ask - bid) / mid) * 10_000 : null;
-
-    if (spreadBps !== null && (!Number.isFinite(spreadBps) || spreadBps > maxSpreadBps)) {
-      return {
-        ok: false,
-        reason: "Spread too wide",
-        details: { bid, ask, spreadBps: Number.isFinite(spreadBps) ? spreadBps : null, maxSpreadBps },
-      };
-    }
-
-    const dailyBar = snapshot.daily_bar ?? null;
-    const prevDailyBar = snapshot.prev_daily_bar ?? null;
-    const getBarDollarVolume = (bar: typeof dailyBar): number | null => {
-      const volume = typeof bar?.v === "number" && Number.isFinite(bar.v) && bar.v > 0 ? bar.v : null;
-      const price =
-        typeof bar?.vw === "number" && Number.isFinite(bar.vw)
-          ? bar.vw
-          : typeof bar?.c === "number" && Number.isFinite(bar.c)
-            ? bar.c
-            : null;
-      if (volume === null || price === null || !Number.isFinite(price) || price <= 0) {
+      const snapshotSymbol = isCrypto ? normalizeCryptoSymbol(symbol) : symbol;
+      let snapshotError: unknown = null;
+      const snapshot = await (isCrypto
+        ? alpaca.marketData.getCryptoSnapshot(snapshotSymbol)
+        : alpaca.marketData.getSnapshot(snapshotSymbol)
+      ).catch((error) => {
+        snapshotError = error;
         return null;
+      });
+      if (!snapshot) {
+        return snapshotError
+          ? {
+              ok: false,
+              reason: "No market snapshot (market data error)",
+              details: { isCrypto, snapshotError: String(snapshotError) },
+            }
+          : { ok: false, reason: "No market snapshot (market data unavailable)", details: { isCrypto } };
       }
-      const dollarVolume = volume * price;
-      return Number.isFinite(dollarVolume) && dollarVolume >= 0 ? dollarVolume : null;
-    };
 
-    const dailyBarDollarVolume = getBarDollarVolume(dailyBar);
-    const prevDailyBarDollarVolume = getBarDollarVolume(prevDailyBar);
-    const daily =
-      dailyBarDollarVolume !== null || prevDailyBarDollarVolume !== null
-        ? (prevDailyBarDollarVolume ?? -1) >= (dailyBarDollarVolume ?? -1)
-          ? prevDailyBar
-          : dailyBar
-        : // Fall back to previous-day bar for crypto to avoid "early day v=0" false blocks.
-          isCrypto
-          ? prevDailyBar || dailyBar
-          : dailyBar || prevDailyBar;
+      const price =
+        snapshot.latest_trade?.price ?? snapshot.latest_quote?.ask_price ?? snapshot.latest_quote?.bid_price ?? 0;
+      if (!Number.isFinite(price) || price <= 0) {
+        return { ok: false, reason: "No valid price from snapshot" };
+      }
 
-    const dailyVolume = typeof daily?.v === "number" && Number.isFinite(daily.v) && daily.v > 0 ? daily.v : 0;
-    const dailyPrice =
-      typeof daily?.vw === "number" && Number.isFinite(daily.vw)
-        ? daily.vw
-        : typeof daily?.c === "number" && Number.isFinite(daily.c)
-          ? daily.c
-          : null;
-    const dailyDollarVolume = dailyPrice !== null ? dailyVolume * dailyPrice : null;
-    if (minDollarVolume > 0) {
-      if (!daily || dailyDollarVolume === null) {
+      if (price < minPrice) {
+        return { ok: false, reason: "Price below minimum", details: { price, minPrice } };
+      }
+
+      const bid = snapshot.latest_quote?.bid_price ?? null;
+      const ask = snapshot.latest_quote?.ask_price ?? null;
+      const hasQuote =
+        typeof bid === "number" &&
+        Number.isFinite(bid) &&
+        bid > 0 &&
+        typeof ask === "number" &&
+        Number.isFinite(ask) &&
+        ask > 0;
+      if (!hasQuote && maxSpreadBps < 10_000) {
         return {
           ok: false,
-          reason: "Dollar volume unavailable",
-          details: { isCrypto, minDollarVolume, dailyVolume, dailyPrice, dailyDollarVolume },
+          reason: "Quote unavailable (spread gate)",
+          details: { bid, ask, maxSpreadBps, isCrypto },
         };
       }
-      if (!Number.isFinite(dailyDollarVolume) || dailyDollarVolume < minDollarVolume) {
+      if (hasQuote && ask < bid) {
+        return { ok: false, reason: "Invalid quote (ask below bid)", details: { bid, ask } };
+      }
+      const mid = hasQuote ? (bid + ask) / 2 : 0;
+      const spreadBps = hasQuote && mid > 0 ? ((ask - bid) / mid) * 10_000 : null;
+
+      if (spreadBps !== null && (!Number.isFinite(spreadBps) || spreadBps > maxSpreadBps)) {
         return {
           ok: false,
-          reason: "Dollar volume too low",
-          details: { dailyDollarVolume, minDollarVolume, dailyVolume, dailyPrice },
+          reason: "Spread too wide",
+          details: { bid, ask, spreadBps: Number.isFinite(spreadBps) ? spreadBps : null, maxSpreadBps },
         };
       }
-    }
 
-    if (trendLookbackBars >= 2 && isCrypto) {
-      const first =
-        typeof snapshot.prev_daily_bar?.c === "number" && Number.isFinite(snapshot.prev_daily_bar.c)
-          ? snapshot.prev_daily_bar.c
-          : 0;
-      const last =
-        typeof snapshot.daily_bar?.c === "number" && Number.isFinite(snapshot.daily_bar.c) ? snapshot.daily_bar.c : 0;
-      if (first > 0 && last > 0) {
-        const retPct = ((last - first) / first) * 100;
-        if (retPct < minTrendReturnPct) {
+      const dailyBar = snapshot.daily_bar ?? null;
+      const prevDailyBar = snapshot.prev_daily_bar ?? null;
+      const getBarDollarVolume = (bar: typeof dailyBar, fallbackPrice: number): number | null => {
+        const volume = typeof bar?.v === "number" && Number.isFinite(bar.v) && bar.v > 0 ? bar.v : null;
+        const barPrice =
+          typeof bar?.vw === "number" && Number.isFinite(bar.vw)
+            ? bar.vw
+            : typeof bar?.c === "number" && Number.isFinite(bar.c)
+              ? bar.c
+              : null;
+        const effectivePrice =
+          barPrice !== null ? barPrice : Number.isFinite(fallbackPrice) && fallbackPrice > 0 ? fallbackPrice : null;
+        if (volume === null || effectivePrice === null) {
+          return null;
+        }
+        const dollarVolume = volume * effectivePrice;
+        return Number.isFinite(dollarVolume) && dollarVolume >= 0 ? dollarVolume : null;
+      };
+
+      const dailyBarDollarVolume = getBarDollarVolume(dailyBar, price);
+      const prevDailyBarDollarVolume = getBarDollarVolume(prevDailyBar, price);
+      const daily =
+        dailyBarDollarVolume !== null || prevDailyBarDollarVolume !== null
+          ? (prevDailyBarDollarVolume ?? -1) >= (dailyBarDollarVolume ?? -1)
+            ? prevDailyBar
+            : dailyBar
+          : // Fall back to previous-day bar for crypto to avoid "early day v=0" false blocks.
+            isCrypto
+            ? prevDailyBar || dailyBar
+            : dailyBar || prevDailyBar;
+
+      const dailyVolume = typeof daily?.v === "number" && Number.isFinite(daily.v) && daily.v > 0 ? daily.v : 0;
+      const dailyPrice =
+        typeof daily?.vw === "number" && Number.isFinite(daily.vw)
+          ? daily.vw
+          : typeof daily?.c === "number" && Number.isFinite(daily.c)
+            ? daily.c
+            : price;
+      const dailyDollarVolume = dailyVolume > 0 ? dailyVolume * dailyPrice : null;
+      if (minDollarVolume > 0) {
+        if (!daily || dailyDollarVolume === null || !Number.isFinite(dailyDollarVolume)) {
           return {
             ok: false,
-            reason: "Trend not confirmed",
-            details: { retPct, minTrendReturnPct, trendTimeframe: "1Day", isCrypto, cryptoTrendSource: "daily_bar" },
+            reason: "Dollar volume unavailable",
+            details: { isCrypto, minDollarVolume, dailyVolume, dailyPrice, dailyDollarVolume },
           };
         }
-      } else {
-        return {
-          ok: false,
-          reason: "Trend bars unavailable (crypto daily bars missing)",
-          details: { first, last, trendTimeframe: "1Day", isCrypto },
-        };
+        if (dailyDollarVolume < minDollarVolume) {
+          return {
+            ok: false,
+            reason: "Dollar volume too low",
+            details: { dailyDollarVolume, minDollarVolume, dailyVolume, dailyPrice },
+          };
+        }
       }
-    }
 
-    if (trendLookbackBars >= 2 && !isCrypto) {
-      let bars: Awaited<ReturnType<typeof alpaca.marketData.getBars>>;
-      try {
-        const requiredBars = Math.min(200, Math.max(2, trendLookbackBars));
-        bars = await alpaca.marketData.getBars(symbol, trendTimeframe, { limit: requiredBars });
+      if (trendLookbackBars >= 2 && isCrypto) {
+        const first =
+          typeof snapshot.prev_daily_bar?.c === "number" && Number.isFinite(snapshot.prev_daily_bar.c)
+            ? snapshot.prev_daily_bar.c
+            : 0;
+        const last =
+          typeof snapshot.daily_bar?.c === "number" && Number.isFinite(snapshot.daily_bar.c) ? snapshot.daily_bar.c : 0;
+        if (first > 0 && last > 0) {
+          const retPct = ((last - first) / first) * 100;
+          if (retPct < minTrendReturnPct) {
+            return {
+              ok: false,
+              reason: "Trend not confirmed",
+              details: { retPct, minTrendReturnPct, trendTimeframe: "1Day", isCrypto, cryptoTrendSource: "daily_bar" },
+            };
+          }
+        } else {
+          return {
+            ok: false,
+            reason: "Trend bars unavailable (crypto daily bars missing)",
+            details: { first, last, trendTimeframe: "1Day", isCrypto },
+          };
+        }
+      }
+
+      if (trendLookbackBars >= 2 && !isCrypto) {
+        let bars: Awaited<ReturnType<typeof alpaca.marketData.getBars>>;
+        try {
+          const requiredBars = Math.min(200, Math.max(2, trendLookbackBars));
+          bars = await alpaca.marketData.getBars(symbol, trendTimeframe, { limit: requiredBars });
+          if (bars.length < requiredBars) {
+            return {
+              ok: false,
+              reason: "Trend bars unavailable (insufficient history)",
+              details: { symbol, trendTimeframe, barsCount: bars.length, requiredBars },
+            };
+          }
+        } catch (error) {
+          return {
+            ok: false,
+            reason: "Trend bars unavailable (market data error)",
+            details: { symbol, trendTimeframe, error: String(error) },
+          };
+        }
+        const first = bars[0]!.c ?? bars[0]!.o;
+        const last = bars[bars.length - 1]!.c ?? bars[bars.length - 1]!.o;
+        if (!Number.isFinite(first) || !Number.isFinite(last) || first <= 0 || last <= 0) {
+          return {
+            ok: false,
+            reason: "Trend bars invalid (missing/invalid prices)",
+            details: { symbol, trendTimeframe, first, last },
+          };
+        }
+        const retPct = ((last - first) / first) * 100;
+        if (retPct < minTrendReturnPct) {
+          return { ok: false, reason: "Trend not confirmed", details: { retPct, minTrendReturnPct, trendTimeframe } };
+        }
+      }
+
+      if (!isCrypto && regimeEnabled && regimeSymbol) {
+        let bars: Awaited<ReturnType<typeof alpaca.marketData.getBars>>;
+        const requiredBars = Math.min(200, Math.max(2, regimeLookbackBars));
+        try {
+          bars = await alpaca.marketData.getBars(regimeSymbol, regimeTimeframe, {
+            limit: requiredBars,
+          });
+        } catch (error) {
+          return {
+            ok: false,
+            reason: "Regime bars unavailable (market data error)",
+            details: { regimeSymbol, regimeTimeframe, error: String(error) },
+          };
+        }
         if (bars.length < requiredBars) {
           return {
             ok: false,
-            reason: "Trend bars unavailable (insufficient history)",
-            details: { symbol, trendTimeframe, barsCount: bars.length, requiredBars },
+            reason: "Regime bars unavailable (insufficient history)",
+            details: { regimeSymbol, regimeTimeframe, barsCount: bars.length, requiredBars },
           };
         }
-      } catch (error) {
-        return {
-          ok: false,
-          reason: "Trend bars unavailable (market data error)",
-          details: { symbol, trendTimeframe, error: String(error) },
-        };
+        const first = bars[0]!.c ?? bars[0]!.o;
+        const last = bars[bars.length - 1]!.c ?? bars[bars.length - 1]!.o;
+        if (!Number.isFinite(first) || !Number.isFinite(last) || first <= 0 || last <= 0) {
+          return {
+            ok: false,
+            reason: "Regime bars invalid (missing/invalid prices)",
+            details: { regimeSymbol, regimeTimeframe, first, last },
+          };
+        }
+        const retPct = ((last - first) / first) * 100;
+        if (retPct < regimeMinReturnPct) {
+          return {
+            ok: false,
+            reason: "Market regime filter blocked entry",
+            details: { regimeSymbol, regimeTimeframe, retPct, regimeMinReturnPct },
+          };
+        }
       }
-      const first = bars[0]!.c ?? bars[0]!.o;
-      const last = bars[bars.length - 1]!.c ?? bars[bars.length - 1]!.o;
-      if (!Number.isFinite(first) || !Number.isFinite(last) || first <= 0 || last <= 0) {
-        return {
-          ok: false,
-          reason: "Trend bars invalid (missing/invalid prices)",
-          details: { symbol, trendTimeframe, first, last },
-        };
-      }
-      const retPct = ((last - first) / first) * 100;
-      if (retPct < minTrendReturnPct) {
-        return { ok: false, reason: "Trend not confirmed", details: { retPct, minTrendReturnPct, trendTimeframe } };
-      }
-    }
 
-    if (!isCrypto && regimeEnabled && regimeSymbol) {
-      let bars: Awaited<ReturnType<typeof alpaca.marketData.getBars>>;
-      const requiredBars = Math.min(200, Math.max(2, regimeLookbackBars));
-      try {
-        bars = await alpaca.marketData.getBars(regimeSymbol, regimeTimeframe, {
-          limit: requiredBars,
-        });
-      } catch (error) {
-        return {
-          ok: false,
-          reason: "Regime bars unavailable (market data error)",
-          details: { regimeSymbol, regimeTimeframe, error: String(error) },
-        };
-      }
-      if (bars.length < requiredBars) {
-        return {
-          ok: false,
-          reason: "Regime bars unavailable (insufficient history)",
-          details: { regimeSymbol, regimeTimeframe, barsCount: bars.length, requiredBars },
-        };
-      }
-      const first = bars[0]!.c ?? bars[0]!.o;
-      const last = bars[bars.length - 1]!.c ?? bars[bars.length - 1]!.o;
-      if (!Number.isFinite(first) || !Number.isFinite(last) || first <= 0 || last <= 0) {
-        return {
-          ok: false,
-          reason: "Regime bars invalid (missing/invalid prices)",
-          details: { regimeSymbol, regimeTimeframe, first, last },
-        };
-      }
-      const retPct = ((last - first) / first) * 100;
-      if (retPct < regimeMinReturnPct) {
-        return {
-          ok: false,
-          reason: "Market regime filter blocked entry",
-          details: { regimeSymbol, regimeTimeframe, retPct, regimeMinReturnPct },
-        };
-      }
+      return { ok: true };
+    } catch (error) {
+      return {
+        ok: false,
+        reason: "Pre-trade gates error",
+        details: { symbol, isCrypto, error: String(error) },
+      };
     }
-
-    return { ok: true };
   }
 
   private async executeSell(

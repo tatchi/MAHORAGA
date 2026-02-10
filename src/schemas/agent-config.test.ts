@@ -152,6 +152,20 @@ describe("AgentConfigSchema", () => {
       }
     });
 
+    it("normalizes 1H/1D timeframes", () => {
+      const config = {
+        ...createValidConfig(),
+        entry_trend_timeframe: "1H",
+        regime_timeframe: "1D",
+      };
+      const result = AgentConfigSchema.safeParse(config);
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.entry_trend_timeframe).toBe("1Hour");
+        expect(result.data.regime_timeframe).toBe("1Day");
+      }
+    });
+
     it("rejects negative max_position_value", () => {
       const config = { ...createValidConfig(), max_position_value: -1000 };
       const result = AgentConfigSchema.safeParse(config);
