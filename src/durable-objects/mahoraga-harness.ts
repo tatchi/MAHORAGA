@@ -3871,7 +3871,8 @@ Response format:
   }
 
   private jsonResponse(data: unknown, init: ResponseInit = {}): Response {
-    const headers: HeadersInit = { "Content-Type": "application/json", ...(init.headers ?? {}) };
+    const headers = new Headers(init.headers);
+    headers.set("Content-Type", "application/json");
     return new Response(JSON.stringify(data, null, 2), { ...init, headers });
   }
 
