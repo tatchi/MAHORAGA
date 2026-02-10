@@ -3252,8 +3252,8 @@ Response format:
     }
 
     const price =
-      snapshot.latest_trade?.price || snapshot.latest_quote?.ask_price || snapshot.latest_quote?.bid_price || 0;
-    if (price <= 0) {
+      snapshot.latest_trade?.price ?? snapshot.latest_quote?.ask_price ?? snapshot.latest_quote?.bid_price ?? 0;
+    if (!Number.isFinite(price) || price <= 0) {
       return { ok: false, reason: "No valid price from snapshot" };
     }
 
