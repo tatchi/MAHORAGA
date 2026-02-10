@@ -3183,13 +3183,15 @@ Response format:
         if (isCrypto && applyGatesToCrypto) {
           const trendTimeframe = this.getConfigString("entry_trend_timeframe", "1Hour");
           const trendLookbackBars = Math.round(this.getConfigNumber("entry_trend_lookback_bars", 20));
-          if (trendTimeframe !== "1Day" || trendLookbackBars !== 2) {
+          const effectiveTrendTimeframe = "1Day";
+          const effectiveTrendLookbackBars = Math.min(2, Math.max(0, trendLookbackBars));
+          if (trendTimeframe !== effectiveTrendTimeframe || trendLookbackBars !== effectiveTrendLookbackBars) {
             this.log("Executor", "crypto_gates_override", {
               symbol: orderSymbol,
               configured_trend_timeframe: trendTimeframe,
               configured_trend_lookback_bars: trendLookbackBars,
-              effective_trend_timeframe: "1Day",
-              effective_trend_lookback_bars: 2,
+              effective_trend_timeframe: effectiveTrendTimeframe,
+              effective_trend_lookback_bars: effectiveTrendLookbackBars,
             });
           }
         }
@@ -3242,8 +3244,12 @@ Response format:
     const minDollarVolume = this.getConfigNumber("entry_min_dollar_volume", 10_000_000);
     const maxSpreadBps = this.getConfigNumber("entry_max_spread_bps", 50);
 
-    const trendTimeframe = this.getConfigString("entry_trend_timeframe", "1Hour");
-    const trendLookbackBars = Math.round(this.getConfigNumber("entry_trend_lookback_bars", 20));
+    const configuredTrendTimeframe = this.getConfigString("entry_trend_timeframe", "1Hour");
+    const configuredTrendLookbackBars = Math.round(this.getConfigNumber("entry_trend_lookback_bars", 20));
+    const trendTimeframe = isCrypto ? "1Day" : configuredTrendTimeframe;
+    const trendLookbackBars = isCrypto
+      ? Math.min(2, Math.max(0, configuredTrendLookbackBars))
+      : configuredTrendLookbackBars;
     const minTrendReturnPct = this.getConfigNumber("entry_min_trend_return_pct", 0.5);
 
     const regimeEnabled = this.getConfigBoolean("regime_filter_enabled", false);
