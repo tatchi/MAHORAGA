@@ -3218,7 +3218,35 @@ Response format:
       };
     }
 
-    const daily = snapshot.daily_bar || snapshot.prev_daily_bar;
+    const dailyBar = snapshot.daily_bar ?? null;
+    const prevDailyBar = snapshot.prev_daily_bar ?? null;
+    const getBarDollarVolume = (bar: typeof dailyBar): number | null => {
+      const volume = typeof bar?.v === "number" && Number.isFinite(bar.v) && bar.v > 0 ? bar.v : null;
+      const price =
+        typeof bar?.vw === "number" && Number.isFinite(bar.vw)
+          ? bar.vw
+          : typeof bar?.c === "number" && Number.isFinite(bar.c)
+            ? bar.c
+            : null;
+      if (volume === null || price === null || !Number.isFinite(price) || price <= 0) {
+        return null;
+      }
+      const dollarVolume = volume * price;
+      return Number.isFinite(dollarVolume) && dollarVolume >= 0 ? dollarVolume : null;
+    };
+
+    const dailyBarDollarVolume = getBarDollarVolume(dailyBar);
+    const prevDailyBarDollarVolume = getBarDollarVolume(prevDailyBar);
+    const daily =
+      dailyBarDollarVolume !== null || prevDailyBarDollarVolume !== null
+        ? (prevDailyBarDollarVolume ?? -1) >= (dailyBarDollarVolume ?? -1)
+          ? prevDailyBar
+          : dailyBar
+        : // Fall back to previous-day bar for crypto to avoid "early day v=0" false blocks.
+          isCrypto
+          ? prevDailyBar || dailyBar
+          : dailyBar || prevDailyBar;
+
     const dailyVolume = typeof daily?.v === "number" && Number.isFinite(daily.v) && daily.v > 0 ? daily.v : 0;
     const dailyPrice =
       typeof daily?.vw === "number" && Number.isFinite(daily.vw)
