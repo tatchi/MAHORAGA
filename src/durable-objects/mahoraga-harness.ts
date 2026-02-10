@@ -3140,12 +3140,12 @@ Response format:
             return false;
           }
         }
+      }
 
-        const gate = await this.preTradeGates(alpaca, symbol);
-        if (!gate.ok) {
-          this.log("Executor", "buy_blocked", { symbol, reason: gate.reason, ...gate.details });
-          return false;
-        }
+      const gate = await this.preTradeGates(alpaca, symbol, { isCrypto });
+      if (!gate.ok) {
+        this.log("Executor", "buy_blocked", { symbol, reason: gate.reason, ...gate.details });
+        return false;
       }
 
       const order = await alpaca.trading.createOrder({
@@ -3181,7 +3181,8 @@ Response format:
 
   private async preTradeGates(
     alpaca: ReturnType<typeof createAlpacaProviders>,
-    symbol: string
+    symbol: string,
+    { isCrypto }: { isCrypto: boolean }
   ): Promise<{ ok: true } | { ok: false; reason: string; details?: Record<string, unknown> }> {
     const minPrice = this.getConfigNumber("entry_min_price", 2);
     const minDollarVolume = this.getConfigNumber("entry_min_dollar_volume", 10_000_000);
@@ -3197,9 +3198,13 @@ Response format:
     const regimeLookbackBars = Math.round(this.getConfigNumber("regime_lookback_bars", 50));
     const regimeMinReturnPct = this.getConfigNumber("regime_min_return_pct", 0);
 
-    const snapshot = await alpaca.marketData.getSnapshot(symbol).catch(() => null);
+    const snapshotSymbol = isCrypto ? normalizeCryptoSymbol(symbol) : symbol;
+    const snapshot = await (isCrypto
+      ? alpaca.marketData.getCryptoSnapshot(snapshotSymbol)
+      : alpaca.marketData.getSnapshot(snapshotSymbol)
+    ).catch(() => null);
     if (!snapshot) {
-      return { ok: false, reason: "No market snapshot (market data unavailable)" };
+      return { ok: false, reason: "No market snapshot (market data unavailable)", details: { isCrypto } };
     }
 
     const price =
@@ -3235,7 +3240,28 @@ Response format:
       };
     }
 
-    if (trendLookbackBars >= 2) {
+    if (trendLookbackBars >= 2 && isCrypto) {
+      const first = snapshot.prev_daily_bar?.c || 0;
+      const last = snapshot.daily_bar?.c || 0;
+      if (first > 0 && last > 0) {
+        const retPct = ((last - first) / first) * 100;
+        if (retPct < minTrendReturnPct) {
+          return {
+            ok: false,
+            reason: "Trend not confirmed",
+            details: { retPct, minTrendReturnPct, trendTimeframe, isCrypto, cryptoTrendSource: "daily_bar" },
+          };
+        }
+      } else {
+        return {
+          ok: false,
+          reason: "Trend bars unavailable (insufficient data)",
+          details: { trendTimeframe, isCrypto, cryptoTrendSource: "daily_bar" },
+        };
+      }
+    }
+
+    if (trendLookbackBars >= 2 && !isCrypto) {
       let bars: Awaited<ReturnType<typeof alpaca.marketData.getBars>>;
       try {
         bars = await alpaca.marketData.getBars(symbol, trendTimeframe, { limit: Math.min(200, trendLookbackBars) });
