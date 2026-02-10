@@ -152,11 +152,11 @@ describe("AgentConfigSchema", () => {
       }
     });
 
-    it("normalizes 1H/1D timeframes", () => {
+    it("normalizes 1H/1D timeframes (case/whitespace-insensitive)", () => {
       const config = {
         ...createValidConfig(),
-        entry_trend_timeframe: "1H",
-        regime_timeframe: "1D",
+        entry_trend_timeframe: " 1h ",
+        regime_timeframe: "1d",
       };
       const result = AgentConfigSchema.safeParse(config);
       expect(result.success).toBe(true);

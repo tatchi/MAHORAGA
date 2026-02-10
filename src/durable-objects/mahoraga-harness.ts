@@ -1177,9 +1177,9 @@ export class MahoragaHarness extends DurableObject<Env> {
 
         case "kill":
           if (!this.isKillSwitchAuthorized(request)) {
-            return new Response(
-              JSON.stringify({ error: "Forbidden. Requires: Authorization: Bearer <KILL_SWITCH_SECRET>" }),
-              { status: 403, headers: { "Content-Type": "application/json" } }
+            return this.jsonResponse(
+              { ok: false, error: "Forbidden. Requires: Authorization: Bearer <KILL_SWITCH_SECRET>" },
+              { status: 403 }
             );
           }
           return this.handleKillSwitch();
@@ -1293,6 +1293,7 @@ export class MahoragaHarness extends DurableObject<Env> {
   private async handleGetHistory(url: URL): Promise<Response> {
     const alpaca = createAlpacaProviders(this.env);
     const period = url.searchParams.get("period") || "1M";
+    // Note: Alpaca portfolio-history timeframes ("1D", "1H", ...) differ from market-data bar timeframes ("1Day", "1Hour", ...).
     const rawTimeframe = (url.searchParams.get("timeframe") || "1D").trim();
     const upperTimeframe = rawTimeframe.toUpperCase();
     const timeframe =
