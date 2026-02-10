@@ -3195,6 +3195,13 @@ Response format:
       typeof ask === "number" &&
       Number.isFinite(ask) &&
       ask > 0;
+    if (!hasQuote && maxSpreadBps < 10_000) {
+      return {
+        ok: false,
+        reason: "Quote unavailable (spread gate)",
+        details: { bid, ask, maxSpreadBps },
+      };
+    }
     if (hasQuote && ask < bid) {
       return { ok: false, reason: "Invalid quote (ask below bid)", details: { bid, ask } };
     }
@@ -3245,7 +3252,11 @@ Response format:
           };
         }
       } else {
-        // Some crypto snapshot shapes don't include daily bars; don't hard-block solely due to missing trend bars.
+        return {
+          ok: false,
+          reason: "Trend bars unavailable (crypto daily bars missing)",
+          details: { first, last, trendTimeframe: "1Day", isCrypto },
+        };
       }
     }
 
