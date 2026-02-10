@@ -1258,7 +1258,10 @@ export class MahoragaHarness extends DurableObject<Env> {
       ...(this.state.config as unknown as Record<string, unknown>),
       ...(body as Record<string, unknown>),
     };
-    const result = safeValidateAgentConfig(candidate);
+    const result = safeValidateAgentConfig({
+      ...(DEFAULT_STATE.config as unknown as Record<string, unknown>),
+      ...candidate,
+    });
     if (!result.success) {
       return this.jsonResponse({ ok: false, issues: result.error.issues }, { status: 400 });
     }
