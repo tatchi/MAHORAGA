@@ -848,7 +848,7 @@ export class MahoragaHarness extends DurableObject<Env> {
           : {};
       const validatedConfig = safeValidateAgentConfig({ ...DEFAULT_STATE.config, ...candidateConfig });
       if (validatedConfig.success) {
-        this.state.config = validatedConfig.data as unknown as AgentConfig;
+        this.state.config = validatedConfig.data;
       } else {
         this.log("System", "config_invalid_reset", {
           reason: "Persisted config failed schema validation; using defaults in-memory (not persisted)",
@@ -1262,7 +1262,7 @@ export class MahoragaHarness extends DurableObject<Env> {
     if (!result.success) {
       return this.jsonResponse({ ok: false, issues: result.error.issues }, { status: 400 });
     }
-    this.state.config = result.data as unknown as AgentConfig;
+    this.state.config = result.data;
     this.initializeLLM();
     await this.persist();
     return this.jsonResponse({ ok: true, data: this.state.config });
