@@ -3271,7 +3271,7 @@ Response format:
       };
     }
 
-    const daily = snapshot.daily_bar;
+    const daily = snapshot.daily_bar || snapshot.prev_daily_bar;
     const dailyDollarVolume = daily && daily.v > 0 ? daily.v * (daily.vw || daily.c) : 0;
     if (dailyDollarVolume < minDollarVolume) {
       return {
@@ -3305,19 +3305,20 @@ Response format:
     if (trendLookbackBars >= 2 && !isCrypto) {
       let bars: Awaited<ReturnType<typeof alpaca.marketData.getBars>>;
       try {
-        bars = await alpaca.marketData.getBars(symbol, trendTimeframe, { limit: Math.min(200, trendLookbackBars) });
+        const requiredBars = Math.min(200, Math.max(2, trendLookbackBars));
+        bars = await alpaca.marketData.getBars(symbol, trendTimeframe, { limit: requiredBars });
+        if (bars.length < requiredBars) {
+          return {
+            ok: false,
+            reason: "Trend bars unavailable (insufficient history)",
+            details: { symbol, trendTimeframe, barsCount: bars.length, requiredBars },
+          };
+        }
       } catch (error) {
         return {
           ok: false,
           reason: "Trend bars unavailable (market data error)",
           details: { symbol, trendTimeframe, error: String(error) },
-        };
-      }
-      if (bars.length < 2) {
-        return {
-          ok: false,
-          reason: "Trend bars unavailable (insufficient data)",
-          details: { symbol, trendTimeframe, barsCount: bars.length },
         };
       }
       const first = bars[0]!.c || bars[0]!.o;
