@@ -1324,10 +1324,7 @@ export class MahoragaHarness extends DurableObject<Env> {
       });
     } catch (error) {
       this.log("System", "history_error", { error: String(error) });
-      return new Response(JSON.stringify({ ok: false, error: String(error) }), {
-        status: 500,
-        headers: { "Content-Type": "application/json" },
-      });
+      return this.jsonResponse({ ok: false, error: String(error) }, { status: 500 });
     }
   }
 
