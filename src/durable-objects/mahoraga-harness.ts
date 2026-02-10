@@ -40,76 +40,15 @@ import type { Env } from "../env.d";
 import { createAlpacaProviders } from "../providers/alpaca";
 import { createLLMProvider } from "../providers/llm/factory";
 import type { Account, LLMProvider, MarketClock, Position } from "../providers/types";
+import { type AgentConfig, safeValidateAgentConfig } from "../schemas/agent-config";
 import { capByVolumeKeepingPinnedMap, capByVolumeKeepingPinnedRecord } from "./social-bounds";
 
 // ============================================================================
 // SECTION 1: TYPES & CONFIGURATION
 // ============================================================================
 // [CUSTOMIZABLE] Modify these interfaces to add new fields for custom data sources.
-// [CUSTOMIZABLE] AgentConfig contains ALL tunable parameters - start here!
+// [CUSTOMIZABLE] AgentConfig is defined/validated in `src/schemas/agent-config.ts` (Zod schema) - start there!
 // ============================================================================
-
-interface AgentConfig {
-  // Polling intervals - how often the agent checks for new data
-  data_poll_interval_ms: number; // [TUNE] Default: 30s. Lower = more API calls
-  analyst_interval_ms: number; // [TUNE] Default: 120s. How often to run trading logic
-
-  // Market-timing behavior (driven by Alpaca clock)
-  premarket_plan_window_minutes: number; // [TUNE] How many minutes before open to generate a plan (default: 5)
-  market_open_execute_window_minutes: number; // [TUNE] How many minutes after open to execute plan (default: 2)
-
-  // Position limits - risk management basics
-  max_position_value: number; // [TUNE] Max $ per position
-  max_positions: number; // [TUNE] Max concurrent positions
-  min_sentiment_score: number; // [TUNE] Min sentiment to consider buying (0-1)
-  min_analyst_confidence: number; // [TUNE] Min LLM confidence to execute (0-1)
-
-  // Risk management - take profit and stop loss
-  take_profit_pct: number; // [TUNE] Take profit at this % gain
-  stop_loss_pct: number; // [TUNE] Stop loss at this % loss
-  position_size_pct_of_cash: number; // [TUNE] % of cash per trade
-
-  // Stale position management - exit positions that have lost momentum
-  stale_position_enabled: boolean;
-  stale_min_hold_hours: number; // [TUNE] Min hours before checking staleness
-  stale_max_hold_days: number; // [TUNE] Force exit after this many days
-  stale_min_gain_pct: number; // [TUNE] Required gain % to hold past max days
-  stale_mid_hold_days: number;
-  stale_mid_min_gain_pct: number;
-  stale_social_volume_decay: number; // [TUNE] Exit if volume drops to this % of entry
-
-  // LLM configuration
-  llm_provider: "openai-raw" | "ai-sdk" | "cloudflare-gateway"; // [TUNE] Provider: openai-raw, ai-sdk, cloudflare-gateway
-  llm_model: string; // [TUNE] Model for quick research (gpt-4o-mini)
-  llm_analyst_model: string; // [TUNE] Model for deep analysis (gpt-4o)
-  llm_min_hold_minutes: number; // [TUNE] Min minutes before LLM can recommend sell (default: 30)
-
-  // Options trading - trade options instead of shares for high-conviction plays
-  options_enabled: boolean; // [TOGGLE] Enable/disable options trading
-  options_min_confidence: number; // [TUNE] Higher threshold for options (riskier)
-  options_max_pct_per_trade: number;
-  options_min_dte: number; // [TUNE] Minimum days to expiration
-  options_max_dte: number; // [TUNE] Maximum days to expiration
-  options_target_delta: number; // [TUNE] Target delta (0.3-0.5 typical)
-  options_min_delta: number;
-  options_max_delta: number;
-  options_stop_loss_pct: number; // [TUNE] Options stop loss (wider than stocks)
-  options_take_profit_pct: number; // [TUNE] Options take profit (higher targets)
-
-  // Crypto trading - 24/7 momentum-based crypto trading
-  crypto_enabled: boolean; // [TOGGLE] Enable/disable crypto trading
-  crypto_symbols: string[]; // [TUNE] Which cryptos to trade (BTC/USD, etc.)
-  crypto_momentum_threshold: number; // [TUNE] Min % move to trigger signal
-  crypto_max_position_value: number;
-  crypto_take_profit_pct: number;
-  crypto_stop_loss_pct: number;
-
-  // Custom ticker blacklist - user-defined symbols to never trade (e.g., insider trading restrictions)
-  ticker_blacklist: string[];
-
-  // Allowed exchanges - only trade stocks listed on these exchanges (avoids OTC data issues)
-  allowed_exchanges: string[];
-}
 
 // [CUSTOMIZABLE] Add fields here when you add new data sources
 interface Signal {
@@ -293,6 +232,20 @@ const DEFAULT_CONFIG: AgentConfig = {
   take_profit_pct: 10,
   stop_loss_pct: 5,
   position_size_pct_of_cash: 25,
+  // Entry quality gates (market-data based)
+  entry_gates_apply_to_crypto: false,
+  entry_min_price: 2,
+  entry_min_dollar_volume: 10_000_000,
+  entry_max_spread_bps: 50,
+  entry_trend_timeframe: "1Hour",
+  entry_trend_lookback_bars: 20,
+  entry_min_trend_return_pct: 0.5,
+  // Market regime filter (optional)
+  regime_filter_enabled: false,
+  regime_symbol: "SPY",
+  regime_timeframe: "1Day",
+  regime_lookback_bars: 50,
+  regime_min_return_pct: 0,
   stale_position_enabled: true,
   stale_min_hold_hours: 24,
   stale_max_hold_days: 3,
@@ -881,7 +834,28 @@ export class MahoragaHarness extends DurableObject<Env> {
       const stored = await this.ctx.storage.get<AgentState>("state");
       if (stored) {
         this.state = { ...DEFAULT_STATE, ...stored };
-        this.state.config = { ...DEFAULT_STATE.config, ...this.state.config };
+        const rawStoredConfig = stored.config as unknown;
+        const storedConfig =
+          rawStoredConfig && typeof rawStoredConfig === "object" && !Array.isArray(rawStoredConfig)
+            ? (rawStoredConfig as Record<string, unknown>)
+            : {};
+        this.state.config = { ...DEFAULT_STATE.config, ...storedConfig };
+      }
+      const rawConfig = this.state.config as unknown;
+      const candidateConfig =
+        rawConfig && typeof rawConfig === "object" && !Array.isArray(rawConfig)
+          ? (rawConfig as Record<string, unknown>)
+          : {};
+      const validatedConfig = safeValidateAgentConfig({ ...DEFAULT_STATE.config, ...candidateConfig });
+      if (validatedConfig.success) {
+        this.state.config = validatedConfig.data;
+      } else {
+        this.log("System", "config_invalid_reset", {
+          reason: "Persisted config failed schema validation; using defaults in-memory (not persisted)",
+          issues: validatedConfig.error.issues,
+          persisted: false,
+        });
+        this.state.config = { ...DEFAULT_STATE.config };
       }
       this.sanitizePersistedSocialState(Date.now());
       this.initializeLLM();
@@ -1203,9 +1177,9 @@ export class MahoragaHarness extends DurableObject<Env> {
 
         case "kill":
           if (!this.isKillSwitchAuthorized(request)) {
-            return new Response(
-              JSON.stringify({ error: "Forbidden. Requires: Authorization: Bearer <KILL_SWITCH_SECRET>" }),
-              { status: 403, headers: { "Content-Type": "application/json" } }
+            return this.jsonResponse(
+              { ok: false, error: "Forbidden. Requires: Authorization: Bearer <KILL_SWITCH_SECRET>" },
+              { status: 403 }
             );
           }
           return this.handleKillSwitch();
@@ -1214,10 +1188,7 @@ export class MahoragaHarness extends DurableObject<Env> {
           return new Response("Not found", { status: 404 });
       }
     } catch (error) {
-      return new Response(JSON.stringify({ error: String(error) }), {
-        status: 500,
-        headers: { "Content-Type": "application/json" },
-      });
+      return this.jsonResponse({ ok: false, error: String(error) }, { status: 500 });
     }
   }
 
@@ -1271,11 +1242,30 @@ export class MahoragaHarness extends DurableObject<Env> {
   }
 
   private async handleUpdateConfig(request: Request): Promise<Response> {
-    const body = (await request.json()) as Partial<AgentConfig>;
-    this.state.config = { ...this.state.config, ...body };
+    let body: unknown = null;
+    try {
+      body = (await request.json()) as unknown;
+    } catch {
+      body = null;
+    }
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      return this.jsonResponse({ ok: false, error: "Invalid JSON body (expected object)" }, { status: 400 });
+    }
+    const candidate = {
+      ...(this.state.config as unknown as Record<string, unknown>),
+      ...(body as Record<string, unknown>),
+    };
+    const result = safeValidateAgentConfig({
+      ...(DEFAULT_STATE.config as unknown as Record<string, unknown>),
+      ...candidate,
+    });
+    if (!result.success) {
+      return this.jsonResponse({ ok: false, issues: result.error.issues }, { status: 400 });
+    }
+    this.state.config = result.data;
     this.initializeLLM();
     await this.persist();
-    return this.jsonResponse({ ok: true, config: this.state.config });
+    return this.jsonResponse({ ok: true, data: this.state.config });
   }
 
   private async handleEnable(): Promise<Response> {
@@ -1303,7 +1293,27 @@ export class MahoragaHarness extends DurableObject<Env> {
   private async handleGetHistory(url: URL): Promise<Response> {
     const alpaca = createAlpacaProviders(this.env);
     const period = url.searchParams.get("period") || "1M";
-    const timeframe = url.searchParams.get("timeframe") || "1D";
+    // Note: Alpaca portfolio-history timeframes ("1D", "1H", ...) differ from market-data bar timeframes ("1Day", "1Hour", ...).
+    const rawTimeframe = (url.searchParams.get("timeframe") || "1D").trim();
+    const upperTimeframe = rawTimeframe.toUpperCase();
+    const timeframe =
+      upperTimeframe === "1D" || upperTimeframe === "1DAY"
+        ? "1D"
+        : upperTimeframe === "1H" || upperTimeframe === "1HOUR"
+          ? "1H"
+          : upperTimeframe === "1MIN"
+            ? "1Min"
+            : upperTimeframe === "5MIN"
+              ? "5Min"
+              : upperTimeframe === "15MIN"
+                ? "15Min"
+                : null;
+    if (!timeframe) {
+      return this.jsonResponse(
+        { ok: false, error: "Invalid timeframe (supported: 1Min, 5Min, 15Min, 1H, 1D)" },
+        { status: 400 }
+      );
+    }
     const intradayReporting = url.searchParams.get("intraday_reporting") as
       | "market_hours"
       | "extended_hours"
@@ -1334,10 +1344,7 @@ export class MahoragaHarness extends DurableObject<Env> {
       });
     } catch (error) {
       this.log("System", "history_error", { error: String(error) });
-      return new Response(JSON.stringify({ ok: false, error: String(error) }), {
-        status: 500,
-        headers: { "Content-Type": "application/json" },
-      });
+      return this.jsonResponse({ ok: false, error: String(error) }, { status: 500 });
     }
   }
 
@@ -3097,7 +3104,13 @@ Response format:
       if (!isCrypto) {
         const allowedExchanges = this.state.config.allowed_exchanges ?? ["NYSE", "NASDAQ", "ARCA", "AMEX", "BATS"];
         if (allowedExchanges.length > 0) {
-          const asset = await alpaca.trading.getAsset(symbol);
+          let asset: Awaited<ReturnType<typeof alpaca.trading.getAsset>>;
+          try {
+            asset = await alpaca.trading.getAsset(symbol);
+          } catch (error) {
+            this.log("Executor", "buy_blocked", { symbol, reason: "Asset lookup failed", error: String(error) });
+            return false;
+          }
           if (!asset) {
             this.log("Executor", "buy_blocked", { symbol, reason: "Asset not found" });
             return false;
@@ -3114,6 +3127,17 @@ Response format:
         }
       }
 
+      const applyGatesToCrypto = this.state.config.entry_gates_apply_to_crypto;
+      if (!isCrypto || applyGatesToCrypto) {
+        const gate = await this.preTradeGates(alpaca, symbol, { isCrypto });
+        if (!gate.ok) {
+          this.log("Executor", "buy_blocked", { symbol, reason: gate.reason, ...gate.details });
+          return false;
+        }
+      } else {
+        this.log("Executor", "buy_gates_skipped", { symbol, reason: "crypto_bypasses_entry_gates" });
+      }
+
       const order = await alpaca.trading.createOrder({
         symbol: orderSymbol,
         notional: Math.round(positionSize * 100) / 100,
@@ -3127,6 +3151,253 @@ Response format:
     } catch (error) {
       this.log("Executor", "buy_failed", { symbol, error: String(error) });
       return false;
+    }
+  }
+
+  private async preTradeGates(
+    alpaca: ReturnType<typeof createAlpacaProviders>,
+    symbol: string,
+    { isCrypto }: { isCrypto: boolean }
+  ): Promise<{ ok: true } | { ok: false; reason: string; details?: Record<string, unknown> }> {
+    try {
+      const config = this.state.config;
+      const minPrice = config.entry_min_price;
+      const minDollarVolume = config.entry_min_dollar_volume;
+      const maxSpreadBps = config.entry_max_spread_bps;
+
+      const configuredTrendTimeframe = config.entry_trend_timeframe;
+      const configuredTrendLookbackBars = config.entry_trend_lookback_bars;
+      const trendTimeframe = isCrypto ? "1Day" : configuredTrendTimeframe;
+      const trendLookbackBars = isCrypto ? 2 : configuredTrendLookbackBars;
+      const minTrendReturnPct = config.entry_min_trend_return_pct;
+
+      const regimeEnabled = config.regime_filter_enabled;
+      const regimeSymbol = config.regime_symbol;
+      const regimeTimeframe = config.regime_timeframe;
+      const regimeLookbackBars = config.regime_lookback_bars;
+      const regimeMinReturnPct = config.regime_min_return_pct;
+
+      const snapshotSymbol = isCrypto ? normalizeCryptoSymbol(symbol) : symbol;
+      let snapshotError: unknown = null;
+      const snapshot = await (isCrypto
+        ? alpaca.marketData.getCryptoSnapshot(snapshotSymbol)
+        : alpaca.marketData.getSnapshot(snapshotSymbol)
+      ).catch((error) => {
+        snapshotError = error;
+        return null;
+      });
+      if (!snapshot) {
+        return snapshotError
+          ? {
+              ok: false,
+              reason: "No market snapshot (market data error)",
+              details: { isCrypto, snapshotError: String(snapshotError) },
+            }
+          : { ok: false, reason: "No market snapshot (market data unavailable)", details: { isCrypto } };
+      }
+
+      const price =
+        snapshot.latest_trade?.price ?? snapshot.latest_quote?.ask_price ?? snapshot.latest_quote?.bid_price ?? 0;
+      if (!Number.isFinite(price) || price <= 0) {
+        return { ok: false, reason: "No valid price from snapshot" };
+      }
+
+      if (price < minPrice) {
+        return { ok: false, reason: "Price below minimum", details: { price, minPrice } };
+      }
+
+      const bid = snapshot.latest_quote?.bid_price ?? null;
+      const ask = snapshot.latest_quote?.ask_price ?? null;
+      const hasQuote =
+        typeof bid === "number" &&
+        Number.isFinite(bid) &&
+        bid > 0 &&
+        typeof ask === "number" &&
+        Number.isFinite(ask) &&
+        ask > 0;
+      if (!hasQuote && maxSpreadBps < 10_000) {
+        return {
+          ok: false,
+          reason: "Quote unavailable (spread gate)",
+          details: { bid, ask, maxSpreadBps, isCrypto },
+        };
+      }
+      if (hasQuote && ask < bid) {
+        return { ok: false, reason: "Invalid quote (ask below bid)", details: { bid, ask } };
+      }
+      const mid = hasQuote ? (bid + ask) / 2 : 0;
+      const spreadBps = hasQuote && mid > 0 ? ((ask - bid) / mid) * 10_000 : null;
+
+      if (spreadBps !== null && (!Number.isFinite(spreadBps) || spreadBps > maxSpreadBps)) {
+        return {
+          ok: false,
+          reason: "Spread too wide",
+          details: { bid, ask, spreadBps: Number.isFinite(spreadBps) ? spreadBps : null, maxSpreadBps },
+        };
+      }
+
+      const dailyBar = snapshot.daily_bar ?? null;
+      const prevDailyBar = snapshot.prev_daily_bar ?? null;
+      const getBarDollarVolume = (bar: typeof dailyBar, fallbackPrice: number): number | null => {
+        const volume = typeof bar?.v === "number" && Number.isFinite(bar.v) && bar.v > 0 ? bar.v : null;
+        const barPrice =
+          typeof bar?.vw === "number" && Number.isFinite(bar.vw)
+            ? bar.vw
+            : typeof bar?.c === "number" && Number.isFinite(bar.c)
+              ? bar.c
+              : null;
+        const effectivePrice =
+          barPrice !== null ? barPrice : Number.isFinite(fallbackPrice) && fallbackPrice > 0 ? fallbackPrice : null;
+        if (volume === null || effectivePrice === null) {
+          return null;
+        }
+        const dollarVolume = volume * effectivePrice;
+        return Number.isFinite(dollarVolume) && dollarVolume >= 0 ? dollarVolume : null;
+      };
+
+      const dailyBarDollarVolume = getBarDollarVolume(dailyBar, price);
+      const prevDailyBarDollarVolume = getBarDollarVolume(prevDailyBar, price);
+      const daily =
+        dailyBarDollarVolume !== null || prevDailyBarDollarVolume !== null
+          ? (prevDailyBarDollarVolume ?? -1) >= (dailyBarDollarVolume ?? -1)
+            ? prevDailyBar
+            : dailyBar
+          : // Fall back to previous-day bar for crypto to avoid "early day v=0" false blocks.
+            isCrypto
+            ? prevDailyBar || dailyBar
+            : dailyBar || prevDailyBar;
+
+      const dailyVolume = typeof daily?.v === "number" && Number.isFinite(daily.v) && daily.v > 0 ? daily.v : 0;
+      const dailyPrice =
+        typeof daily?.vw === "number" && Number.isFinite(daily.vw)
+          ? daily.vw
+          : typeof daily?.c === "number" && Number.isFinite(daily.c)
+            ? daily.c
+            : price;
+      const dailyDollarVolume = dailyVolume > 0 ? dailyVolume * dailyPrice : null;
+      if (minDollarVolume > 0) {
+        if (!daily || dailyDollarVolume === null || !Number.isFinite(dailyDollarVolume)) {
+          return {
+            ok: false,
+            reason: "Dollar volume unavailable",
+            details: { isCrypto, minDollarVolume, dailyVolume, dailyPrice, dailyDollarVolume },
+          };
+        }
+        if (dailyDollarVolume < minDollarVolume) {
+          return {
+            ok: false,
+            reason: "Dollar volume too low",
+            details: { dailyDollarVolume, minDollarVolume, dailyVolume, dailyPrice },
+          };
+        }
+      }
+
+      if (trendLookbackBars >= 2 && isCrypto) {
+        const first =
+          typeof snapshot.prev_daily_bar?.c === "number" && Number.isFinite(snapshot.prev_daily_bar.c)
+            ? snapshot.prev_daily_bar.c
+            : 0;
+        const last =
+          typeof snapshot.daily_bar?.c === "number" && Number.isFinite(snapshot.daily_bar.c) ? snapshot.daily_bar.c : 0;
+        if (first > 0 && last > 0) {
+          const retPct = ((last - first) / first) * 100;
+          if (retPct < minTrendReturnPct) {
+            return {
+              ok: false,
+              reason: "Trend not confirmed",
+              details: { retPct, minTrendReturnPct, trendTimeframe: "1Day", isCrypto, cryptoTrendSource: "daily_bar" },
+            };
+          }
+        } else {
+          return {
+            ok: false,
+            reason: "Trend bars unavailable (crypto daily bars missing)",
+            details: { first, last, trendTimeframe: "1Day", isCrypto },
+          };
+        }
+      }
+
+      if (trendLookbackBars >= 2 && !isCrypto) {
+        let bars: Awaited<ReturnType<typeof alpaca.marketData.getBars>>;
+        try {
+          const requiredBars = Math.min(200, Math.max(2, trendLookbackBars));
+          bars = await alpaca.marketData.getBars(symbol, trendTimeframe, { limit: requiredBars });
+          if (bars.length < requiredBars) {
+            return {
+              ok: false,
+              reason: "Trend bars unavailable (insufficient history)",
+              details: { symbol, trendTimeframe, barsCount: bars.length, requiredBars },
+            };
+          }
+        } catch (error) {
+          return {
+            ok: false,
+            reason: "Trend bars unavailable (market data error)",
+            details: { symbol, trendTimeframe, error: String(error) },
+          };
+        }
+        const first = bars[0]!.c ?? bars[0]!.o;
+        const last = bars[bars.length - 1]!.c ?? bars[bars.length - 1]!.o;
+        if (!Number.isFinite(first) || !Number.isFinite(last) || first <= 0 || last <= 0) {
+          return {
+            ok: false,
+            reason: "Trend bars invalid (missing/invalid prices)",
+            details: { symbol, trendTimeframe, first, last },
+          };
+        }
+        const retPct = ((last - first) / first) * 100;
+        if (retPct < minTrendReturnPct) {
+          return { ok: false, reason: "Trend not confirmed", details: { retPct, minTrendReturnPct, trendTimeframe } };
+        }
+      }
+
+      if (!isCrypto && regimeEnabled && regimeSymbol) {
+        let bars: Awaited<ReturnType<typeof alpaca.marketData.getBars>>;
+        const requiredBars = Math.min(200, Math.max(2, regimeLookbackBars));
+        try {
+          bars = await alpaca.marketData.getBars(regimeSymbol, regimeTimeframe, {
+            limit: requiredBars,
+          });
+        } catch (error) {
+          return {
+            ok: false,
+            reason: "Regime bars unavailable (market data error)",
+            details: { regimeSymbol, regimeTimeframe, error: String(error) },
+          };
+        }
+        if (bars.length < requiredBars) {
+          return {
+            ok: false,
+            reason: "Regime bars unavailable (insufficient history)",
+            details: { regimeSymbol, regimeTimeframe, barsCount: bars.length, requiredBars },
+          };
+        }
+        const first = bars[0]!.c ?? bars[0]!.o;
+        const last = bars[bars.length - 1]!.c ?? bars[bars.length - 1]!.o;
+        if (!Number.isFinite(first) || !Number.isFinite(last) || first <= 0 || last <= 0) {
+          return {
+            ok: false,
+            reason: "Regime bars invalid (missing/invalid prices)",
+            details: { regimeSymbol, regimeTimeframe, first, last },
+          };
+        }
+        const retPct = ((last - first) / first) * 100;
+        if (retPct < regimeMinReturnPct) {
+          return {
+            ok: false,
+            reason: "Market regime filter blocked entry",
+            details: { regimeSymbol, regimeTimeframe, retPct, regimeMinReturnPct },
+          };
+        }
+      }
+
+      return { ok: true };
+    } catch (error) {
+      return {
+        ok: false,
+        reason: "Pre-trade gates error",
+        details: { symbol, isCrypto, error: String(error) },
+      };
     }
   }
 
@@ -3629,10 +3900,10 @@ Response format:
     }
   }
 
-  private jsonResponse(data: unknown): Response {
-    return new Response(JSON.stringify(data, null, 2), {
-      headers: { "Content-Type": "application/json" },
-    });
+  private jsonResponse(data: unknown, init: ResponseInit = {}): Response {
+    const headers = new Headers(init.headers);
+    headers.set("Content-Type", "application/json");
+    return new Response(JSON.stringify(data, null, 2), { ...init, headers });
   }
 
   private sleep(ms: number): Promise<void> {

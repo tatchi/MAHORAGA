@@ -14,6 +14,18 @@ function createValidConfig() {
     take_profit_pct: 10,
     stop_loss_pct: 5,
     position_size_pct_of_cash: 10,
+    entry_gates_apply_to_crypto: false,
+    entry_min_price: 2,
+    entry_min_dollar_volume: 10_000_000,
+    entry_max_spread_bps: 50,
+    entry_trend_timeframe: "1Hour",
+    entry_trend_lookback_bars: 20,
+    entry_min_trend_return_pct: 0.5,
+    regime_filter_enabled: false,
+    regime_symbol: "SPY",
+    regime_timeframe: "1Day",
+    regime_lookback_bars: 50,
+    regime_min_return_pct: 0,
     stale_position_enabled: true,
     stale_min_hold_hours: 4,
     stale_max_hold_days: 7,
@@ -24,6 +36,7 @@ function createValidConfig() {
     llm_provider: "openai-raw" as const,
     llm_model: "gpt-4o-mini",
     llm_analyst_model: "gpt-4o",
+    llm_min_hold_minutes: 30,
     options_enabled: false,
     options_min_confidence: 0.8,
     options_max_pct_per_trade: 0.02,
@@ -41,6 +54,7 @@ function createValidConfig() {
     crypto_take_profit_pct: 15,
     crypto_stop_loss_pct: 10,
     ticker_blacklist: [],
+    allowed_exchanges: ["NYSE", "NASDAQ"],
   };
 }
 
@@ -50,6 +64,51 @@ describe("AgentConfigSchema", () => {
       const config = createValidConfig();
       const result = AgentConfigSchema.safeParse(config);
       expect(result.success).toBe(true);
+    });
+
+    it("accepts config missing entry-gates/regime fields (uses defaults)", () => {
+      const {
+        entry_gates_apply_to_crypto: _entryGatesApplyToCrypto,
+        entry_min_price: _entryMinPrice,
+        entry_min_dollar_volume: _entryMinDollarVolume,
+        entry_max_spread_bps: _entryMaxSpreadBps,
+        entry_trend_timeframe: _entryTrendTimeframe,
+        entry_trend_lookback_bars: _entryTrendLookbackBars,
+        entry_min_trend_return_pct: _entryMinTrendReturnPct,
+        regime_filter_enabled: _regimeEnabled,
+        regime_symbol: _regimeSymbol,
+        regime_timeframe: _regimeTimeframe,
+        regime_lookback_bars: _regimeLookbackBars,
+        regime_min_return_pct: _regimeMinReturnPct,
+        ...legacy
+      } = createValidConfig();
+
+      const result = AgentConfigSchema.safeParse(legacy);
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.entry_trend_timeframe).toBe("1Hour");
+        expect(result.data.regime_timeframe).toBe("1Day");
+        expect(result.data.regime_filter_enabled).toBe(false);
+        expect(result.data.entry_gates_apply_to_crypto).toBe(false);
+      }
+    });
+
+    it("accepts config missing llm_min_hold_minutes (uses default)", () => {
+      const { llm_min_hold_minutes: _llmMinHoldMinutes, ...legacy } = createValidConfig();
+      const result = AgentConfigSchema.safeParse(legacy);
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.llm_min_hold_minutes).toBe(30);
+      }
+    });
+
+    it("accepts config missing allowed_exchanges (uses default)", () => {
+      const { allowed_exchanges: _allowedExchanges, ...legacy } = createValidConfig();
+      const result = AgentConfigSchema.safeParse(legacy);
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.allowed_exchanges).toEqual(["NYSE", "NASDAQ", "ARCA", "AMEX", "BATS"]);
+      }
     });
 
     it("accepts all llm_provider values", () => {
@@ -75,6 +134,38 @@ describe("AgentConfigSchema", () => {
   });
 
   describe("invalid configurations", () => {
+    it("rejects invalid entry_trend_timeframe", () => {
+      const config = { ...createValidConfig(), entry_trend_timeframe: "1HOUR" };
+      const result = AgentConfigSchema.safeParse(config);
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error.issues.some((issue) => issue.path[0] === "entry_trend_timeframe")).toBe(true);
+      }
+    });
+
+    it("rejects invalid regime_timeframe", () => {
+      const config = { ...createValidConfig(), regime_timeframe: "1DAY" };
+      const result = AgentConfigSchema.safeParse(config);
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error.issues.some((issue) => issue.path[0] === "regime_timeframe")).toBe(true);
+      }
+    });
+
+    it("normalizes 1H/1D timeframes (case/whitespace-insensitive)", () => {
+      const config = {
+        ...createValidConfig(),
+        entry_trend_timeframe: " 1h ",
+        regime_timeframe: "1d",
+      };
+      const result = AgentConfigSchema.safeParse(config);
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.entry_trend_timeframe).toBe("1Hour");
+        expect(result.data.regime_timeframe).toBe("1Day");
+      }
+    });
+
     it("rejects negative max_position_value", () => {
       const config = { ...createValidConfig(), max_position_value: -1000 };
       const result = AgentConfigSchema.safeParse(config);
