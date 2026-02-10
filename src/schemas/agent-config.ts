@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+const BarsTimeframeSchema = z.enum(["1Min", "5Min", "15Min", "1Hour", "1Day"]);
+
 export const AgentConfigSchema = z
   .object({
     data_poll_interval_ms: z.number().min(5000).max(300000),
@@ -21,14 +23,14 @@ export const AgentConfigSchema = z
     entry_min_price: z.number().min(0).max(100000),
     entry_min_dollar_volume: z.number().min(0).max(1_000_000_000_000),
     entry_max_spread_bps: z.number().min(0).max(10000),
-    entry_trend_timeframe: z.string().min(1),
+    entry_trend_timeframe: BarsTimeframeSchema,
     entry_trend_lookback_bars: z.number().int().min(2).max(200),
     entry_min_trend_return_pct: z.number().min(-100).max(100),
 
     // Market regime filter
     regime_filter_enabled: z.boolean(),
     regime_symbol: z.string().min(1),
-    regime_timeframe: z.string().min(1),
+    regime_timeframe: BarsTimeframeSchema,
     regime_lookback_bars: z.number().int().min(2).max(200),
     regime_min_return_pct: z.number().min(-100).max(100),
 

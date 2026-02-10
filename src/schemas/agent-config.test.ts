@@ -88,6 +88,24 @@ describe("AgentConfigSchema", () => {
   });
 
   describe("invalid configurations", () => {
+    it("rejects invalid entry_trend_timeframe", () => {
+      const config = { ...createValidConfig(), entry_trend_timeframe: "1HOUR" };
+      const result = AgentConfigSchema.safeParse(config);
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error.issues.some((issue) => issue.path[0] === "entry_trend_timeframe")).toBe(true);
+      }
+    });
+
+    it("rejects invalid regime_timeframe", () => {
+      const config = { ...createValidConfig(), regime_timeframe: "1DAY" };
+      const result = AgentConfigSchema.safeParse(config);
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error.issues.some((issue) => issue.path[0] === "regime_timeframe")).toBe(true);
+      }
+    });
+
     it("rejects negative max_position_value", () => {
       const config = { ...createValidConfig(), max_position_value: -1000 };
       const result = AgentConfigSchema.safeParse(config);
