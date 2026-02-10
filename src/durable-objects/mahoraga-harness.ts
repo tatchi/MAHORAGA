@@ -3349,9 +3349,10 @@ Response format:
 
     if (regimeEnabled && regimeSymbol) {
       let bars: Awaited<ReturnType<typeof alpaca.marketData.getBars>>;
+      const requiredBars = Math.min(200, Math.max(2, regimeLookbackBars));
       try {
         bars = await alpaca.marketData.getBars(regimeSymbol, regimeTimeframe, {
-          limit: Math.min(200, Math.max(2, regimeLookbackBars)),
+          limit: requiredBars,
         });
       } catch (error) {
         return {
@@ -3360,11 +3361,11 @@ Response format:
           details: { regimeSymbol, regimeTimeframe, error: String(error) },
         };
       }
-      if (bars.length < 2) {
+      if (bars.length < requiredBars) {
         return {
           ok: false,
-          reason: "Regime bars unavailable (insufficient data)",
-          details: { regimeSymbol, regimeTimeframe, barsCount: bars.length },
+          reason: "Regime bars unavailable (insufficient history)",
+          details: { regimeSymbol, regimeTimeframe, barsCount: bars.length, requiredBars },
         };
       }
       const first = bars[0]!.c || bars[0]!.o;
