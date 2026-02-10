@@ -45,7 +45,7 @@ export const AgentConfigSchema = z
     llm_provider: z.enum(["openai-raw", "ai-sdk", "cloudflare-gateway"]),
     llm_model: z.string().min(1),
     llm_analyst_model: z.string().min(1),
-    llm_min_hold_minutes: z.number().int().min(0).max(1440),
+    llm_min_hold_minutes: z.number().int().min(0).max(1440).default(30),
 
     options_enabled: z.boolean(),
     options_min_confidence: z.number().min(0).max(1),

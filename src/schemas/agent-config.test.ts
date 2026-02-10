@@ -90,6 +90,15 @@ describe("AgentConfigSchema", () => {
       }
     });
 
+    it("accepts config missing llm_min_hold_minutes (uses default)", () => {
+      const { llm_min_hold_minutes: _llmMinHoldMinutes, ...legacy } = createValidConfig();
+      const result = AgentConfigSchema.safeParse(legacy);
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.llm_min_hold_minutes).toBe(30);
+      }
+    });
+
     it("accepts all llm_provider values", () => {
       const providers = ["openai-raw", "ai-sdk", "cloudflare-gateway"] as const;
       for (const provider of providers) {
