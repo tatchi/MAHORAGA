@@ -3236,32 +3236,60 @@ Response format:
     }
 
     if (trendLookbackBars >= 2) {
-      const bars = await alpaca.marketData.getBars(symbol, trendTimeframe, { limit: Math.min(200, trendLookbackBars) });
-      if (bars.length >= 2) {
-        const first = bars[0]!.c || bars[0]!.o;
-        const last = bars[bars.length - 1]!.c;
-        const retPct = first > 0 ? ((last - first) / first) * 100 : 0;
-        if (retPct < minTrendReturnPct) {
-          return { ok: false, reason: "Trend not confirmed", details: { retPct, minTrendReturnPct, trendTimeframe } };
-        }
+      let bars: Awaited<ReturnType<typeof alpaca.marketData.getBars>>;
+      try {
+        bars = await alpaca.marketData.getBars(symbol, trendTimeframe, { limit: Math.min(200, trendLookbackBars) });
+      } catch (error) {
+        return {
+          ok: false,
+          reason: "Trend bars unavailable (market data error)",
+          details: { symbol, trendTimeframe, error: String(error) },
+        };
+      }
+      if (bars.length < 2) {
+        return {
+          ok: false,
+          reason: "Trend bars unavailable (insufficient data)",
+          details: { symbol, trendTimeframe, barsCount: bars.length },
+        };
+      }
+      const first = bars[0]!.c || bars[0]!.o;
+      const last = bars[bars.length - 1]!.c;
+      const retPct = first > 0 ? ((last - first) / first) * 100 : 0;
+      if (retPct < minTrendReturnPct) {
+        return { ok: false, reason: "Trend not confirmed", details: { retPct, minTrendReturnPct, trendTimeframe } };
       }
     }
 
     if (regimeEnabled && regimeSymbol) {
-      const bars = await alpaca.marketData.getBars(regimeSymbol, regimeTimeframe, {
-        limit: Math.min(200, Math.max(2, regimeLookbackBars)),
-      });
-      if (bars.length >= 2) {
-        const first = bars[0]!.c || bars[0]!.o;
-        const last = bars[bars.length - 1]!.c;
-        const retPct = first > 0 ? ((last - first) / first) * 100 : 0;
-        if (retPct < regimeMinReturnPct) {
-          return {
-            ok: false,
-            reason: "Market regime filter blocked entry",
-            details: { regimeSymbol, regimeTimeframe, retPct, regimeMinReturnPct },
-          };
-        }
+      let bars: Awaited<ReturnType<typeof alpaca.marketData.getBars>>;
+      try {
+        bars = await alpaca.marketData.getBars(regimeSymbol, regimeTimeframe, {
+          limit: Math.min(200, Math.max(2, regimeLookbackBars)),
+        });
+      } catch (error) {
+        return {
+          ok: false,
+          reason: "Regime bars unavailable (market data error)",
+          details: { regimeSymbol, regimeTimeframe, error: String(error) },
+        };
+      }
+      if (bars.length < 2) {
+        return {
+          ok: false,
+          reason: "Regime bars unavailable (insufficient data)",
+          details: { regimeSymbol, regimeTimeframe, barsCount: bars.length },
+        };
+      }
+      const first = bars[0]!.c || bars[0]!.o;
+      const last = bars[bars.length - 1]!.c;
+      const retPct = first > 0 ? ((last - first) / first) * 100 : 0;
+      if (retPct < regimeMinReturnPct) {
+        return {
+          ok: false,
+          reason: "Market regime filter blocked entry",
+          details: { regimeSymbol, regimeTimeframe, retPct, regimeMinReturnPct },
+        };
       }
     }
 
