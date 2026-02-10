@@ -1323,7 +1323,12 @@ export class MahoragaHarness extends DurableObject<Env> {
   }
 
   private async handleUpdateConfig(request: Request): Promise<Response> {
-    const body = (await request.json().catch(() => null)) as unknown;
+    let body: unknown = null;
+    try {
+      body = (await request.json()) as unknown;
+    } catch {
+      body = null;
+    }
     if (!body || typeof body !== "object" || Array.isArray(body)) {
       return this.jsonResponse({ ok: false, error: "Invalid JSON body (expected object)" }, { status: 400 });
     }
@@ -3261,9 +3266,15 @@ Response format:
       return { ok: false, reason: "Price below minimum", details: { price, minPrice } };
     }
 
-    const bid = snapshot.latest_quote?.bid_price || 0;
-    const ask = snapshot.latest_quote?.ask_price || 0;
-    const hasQuote = bid > 0 && ask > 0;
+    const bid = snapshot.latest_quote?.bid_price ?? null;
+    const ask = snapshot.latest_quote?.ask_price ?? null;
+    const hasQuote =
+      typeof bid === "number" &&
+      Number.isFinite(bid) &&
+      bid > 0 &&
+      typeof ask === "number" &&
+      Number.isFinite(ask) &&
+      ask > 0;
     if (hasQuote && ask < bid) {
       return { ok: false, reason: "Invalid quote (ask below bid)", details: { bid, ask } };
     }
@@ -3291,8 +3302,12 @@ Response format:
     }
 
     if (trendLookbackBars >= 2 && isCrypto) {
-      const first = snapshot.prev_daily_bar?.c || 0;
-      const last = snapshot.daily_bar?.c || 0;
+      const first =
+        typeof snapshot.prev_daily_bar?.c === "number" && Number.isFinite(snapshot.prev_daily_bar.c)
+          ? snapshot.prev_daily_bar.c
+          : 0;
+      const last =
+        typeof snapshot.daily_bar?.c === "number" && Number.isFinite(snapshot.daily_bar.c) ? snapshot.daily_bar.c : 0;
       if (first > 0 && last > 0) {
         const retPct = ((last - first) / first) * 100;
         if (retPct < minTrendReturnPct) {
