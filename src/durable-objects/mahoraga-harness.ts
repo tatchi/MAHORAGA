@@ -929,8 +929,9 @@ export class MahoragaHarness extends DurableObject<Env> {
         this.state.config = validatedConfig.data as unknown as AgentConfig;
       } else {
         this.log("System", "config_invalid_reset", {
-          reason: "Persisted config failed schema validation; reset to defaults",
+          reason: "Persisted config failed schema validation; using defaults in-memory (not persisted)",
           issues: validatedConfig.error.issues,
+          persisted: false,
         });
         this.state.config = { ...DEFAULT_STATE.config };
       }
