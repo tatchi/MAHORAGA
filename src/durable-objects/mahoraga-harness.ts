@@ -64,25 +64,25 @@ interface AgentConfig {
   min_sentiment_score: number; // [TUNE] Min sentiment to consider buying (0-1)
   min_analyst_confidence: number; // [TUNE] Min LLM confidence to execute (0-1)
 
-	  // Risk management - take profit and stop loss
-	  take_profit_pct: number; // [TUNE] Take profit at this % gain
-	  stop_loss_pct: number; // [TUNE] Stop loss at this % loss
-	  position_size_pct_of_cash: number; // [TUNE] % of cash per trade
+  // Risk management - take profit and stop loss
+  take_profit_pct: number; // [TUNE] Take profit at this % gain
+  stop_loss_pct: number; // [TUNE] Stop loss at this % loss
+  position_size_pct_of_cash: number; // [TUNE] % of cash per trade
 
-	  // Entry quality gates (market-data based) - reduce trading on illiquid/noisy names
-	  entry_min_price: number;
-	  entry_min_dollar_volume: number;
-	  entry_max_spread_bps: number;
-	  entry_trend_timeframe: string;
-	  entry_trend_lookback_bars: number;
-	  entry_min_trend_return_pct: number;
+  // Entry quality gates (market-data based) - reduce trading on illiquid/noisy names
+  entry_min_price: number;
+  entry_min_dollar_volume: number;
+  entry_max_spread_bps: number;
+  entry_trend_timeframe: string;
+  entry_trend_lookback_bars: number;
+  entry_min_trend_return_pct: number;
 
-	  // Market regime filter - avoid buying risk-on setups in weak tape
-	  regime_filter_enabled: boolean;
-	  regime_symbol: string;
-	  regime_timeframe: string;
-	  regime_lookback_bars: number;
-	  regime_min_return_pct: number;
+  // Market regime filter - avoid buying risk-on setups in weak tape
+  regime_filter_enabled: boolean;
+  regime_symbol: string;
+  regime_timeframe: string;
+  regime_lookback_bars: number;
+  regime_min_return_pct: number;
 
   // Stale position management - exit positions that have lost momentum
   stale_position_enabled: boolean;
