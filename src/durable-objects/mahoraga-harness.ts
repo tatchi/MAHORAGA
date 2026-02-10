@@ -921,13 +921,13 @@ export class MahoragaHarness extends DurableObject<Env> {
           : {};
       const validatedConfig = safeValidateAgentConfig(candidateConfig);
       if (validatedConfig.success) {
-        this.state.config = { ...candidateConfig, ...validatedConfig.data } as AgentConfig;
+        this.state.config = validatedConfig.data as unknown as AgentConfig;
       } else {
         this.log("System", "config_invalid_reset", {
           reason: "Persisted config failed schema validation; reset to defaults",
           issues: validatedConfig.error.issues,
         });
-        this.state.config = { ...candidateConfig, ...DEFAULT_STATE.config } as AgentConfig;
+        this.state.config = { ...DEFAULT_STATE.config };
         await this.persist();
       }
       this.sanitizePersistedSocialState(Date.now());
@@ -1336,7 +1336,7 @@ export class MahoragaHarness extends DurableObject<Env> {
         headers: { "Content-Type": "application/json" },
       });
     }
-    this.state.config = { ...candidate, ...result.data } as AgentConfig;
+    this.state.config = result.data as unknown as AgentConfig;
     this.initializeLLM();
     await this.persist();
     return this.jsonResponse({ ok: true, config: this.state.config });
