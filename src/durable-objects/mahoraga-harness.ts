@@ -3128,49 +3128,45 @@ Response format:
     }
   }
 
-  private getConfigNumber(key: string, fallback: number): number {
-    const value = (this.state.config as unknown as Record<string, unknown>)[key];
-    return typeof value === "number" && Number.isFinite(value) ? value : fallback;
-  }
-
-  private getConfigString(key: string, fallback: string): string {
-    const value = (this.state.config as unknown as Record<string, unknown>)[key];
-    return typeof value === "string" && value.trim().length > 0 ? value : fallback;
-  }
-
-  private getConfigBoolean(key: string, fallback: boolean): boolean {
-    const value = (this.state.config as unknown as Record<string, unknown>)[key];
-    return typeof value === "boolean" ? value : fallback;
-  }
-
   private async preTradeGates(
     alpaca: ReturnType<typeof createAlpacaProviders>,
     symbol: string,
     { isCrypto }: { isCrypto: boolean }
   ): Promise<{ ok: true } | { ok: false; reason: string; details?: Record<string, unknown> }> {
-    const minPrice = this.getConfigNumber("entry_min_price", 2);
-    const minDollarVolume = this.getConfigNumber("entry_min_dollar_volume", 10_000_000);
-    const maxSpreadBps = this.getConfigNumber("entry_max_spread_bps", 50);
+    const config = this.state.config;
+    const minPrice = config.entry_min_price;
+    const minDollarVolume = config.entry_min_dollar_volume;
+    const maxSpreadBps = config.entry_max_spread_bps;
 
-    const configuredTrendTimeframe = this.getConfigString("entry_trend_timeframe", "1Hour");
-    const configuredTrendLookbackBars = Math.round(this.getConfigNumber("entry_trend_lookback_bars", 20));
+    const configuredTrendTimeframe = config.entry_trend_timeframe;
+    const configuredTrendLookbackBars = config.entry_trend_lookback_bars;
     const trendTimeframe = isCrypto ? "1Day" : configuredTrendTimeframe;
     const trendLookbackBars = isCrypto ? 2 : configuredTrendLookbackBars;
-    const minTrendReturnPct = this.getConfigNumber("entry_min_trend_return_pct", 0.5);
+    const minTrendReturnPct = config.entry_min_trend_return_pct;
 
-    const regimeEnabled = this.getConfigBoolean("regime_filter_enabled", false);
-    const regimeSymbol = this.getConfigString("regime_symbol", "SPY");
-    const regimeTimeframe = this.getConfigString("regime_timeframe", "1Day");
-    const regimeLookbackBars = Math.round(this.getConfigNumber("regime_lookback_bars", 50));
-    const regimeMinReturnPct = this.getConfigNumber("regime_min_return_pct", 0);
+    const regimeEnabled = config.regime_filter_enabled;
+    const regimeSymbol = config.regime_symbol;
+    const regimeTimeframe = config.regime_timeframe;
+    const regimeLookbackBars = config.regime_lookback_bars;
+    const regimeMinReturnPct = config.regime_min_return_pct;
 
     const snapshotSymbol = isCrypto ? normalizeCryptoSymbol(symbol) : symbol;
+    let snapshotError: unknown = null;
     const snapshot = await (isCrypto
       ? alpaca.marketData.getCryptoSnapshot(snapshotSymbol)
       : alpaca.marketData.getSnapshot(snapshotSymbol)
-    ).catch(() => null);
+    ).catch((error) => {
+      snapshotError = error;
+      return null;
+    });
     if (!snapshot) {
-      return { ok: false, reason: "No market snapshot (market data unavailable)", details: { isCrypto } };
+      return snapshotError
+        ? {
+            ok: false,
+            reason: "No market snapshot (market data error)",
+            details: { isCrypto, snapshotError: String(snapshotError) },
+          }
+        : { ok: false, reason: "No market snapshot (market data unavailable)", details: { isCrypto } };
     }
 
     const price =
