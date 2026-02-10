@@ -70,6 +70,7 @@ interface AgentConfig {
   position_size_pct_of_cash: number; // [TUNE] % of cash per trade
 
   // Entry quality gates (market-data based) - reduce trading on illiquid/noisy names
+  entry_gates_apply_to_crypto: boolean;
   entry_min_price: number;
   entry_min_dollar_volume: number;
   entry_max_spread_bps: number;
@@ -309,6 +310,7 @@ const DEFAULT_CONFIG: AgentConfig = {
   stop_loss_pct: 5,
   position_size_pct_of_cash: 25,
   // Entry quality gates (market-data based)
+  entry_gates_apply_to_crypto: false,
   entry_min_price: 2,
   entry_min_dollar_volume: 10_000_000,
   entry_max_spread_bps: 50,
@@ -3142,10 +3144,15 @@ Response format:
         }
       }
 
-      const gate = await this.preTradeGates(alpaca, symbol, { isCrypto });
-      if (!gate.ok) {
-        this.log("Executor", "buy_blocked", { symbol, reason: gate.reason, ...gate.details });
-        return false;
+      const applyGatesToCrypto = this.getConfigBoolean("entry_gates_apply_to_crypto", false);
+      if (!isCrypto || applyGatesToCrypto) {
+        const gate = await this.preTradeGates(alpaca, symbol, { isCrypto });
+        if (!gate.ok) {
+          this.log("Executor", "buy_blocked", { symbol, reason: gate.reason, ...gate.details });
+          return false;
+        }
+      } else {
+        this.log("Executor", "buy_gates_skipped", { symbol, reason: "crypto_bypasses_entry_gates" });
       }
 
       const order = await alpaca.trading.createOrder({

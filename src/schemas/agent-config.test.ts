@@ -14,6 +14,7 @@ function createValidConfig() {
     take_profit_pct: 10,
     stop_loss_pct: 5,
     position_size_pct_of_cash: 10,
+    entry_gates_apply_to_crypto: false,
     entry_min_price: 2,
     entry_min_dollar_volume: 10_000_000,
     entry_max_spread_bps: 50,
@@ -67,6 +68,7 @@ describe("AgentConfigSchema", () => {
 
     it("accepts config missing entry-gates/regime fields (uses defaults)", () => {
       const {
+        entry_gates_apply_to_crypto: _entryGatesApplyToCrypto,
         entry_min_price: _entryMinPrice,
         entry_min_dollar_volume: _entryMinDollarVolume,
         entry_max_spread_bps: _entryMaxSpreadBps,
@@ -87,6 +89,7 @@ describe("AgentConfigSchema", () => {
         expect(result.data.entry_trend_timeframe).toBe("1Hour");
         expect(result.data.regime_timeframe).toBe("1Day");
         expect(result.data.regime_filter_enabled).toBe(false);
+        expect(result.data.entry_gates_apply_to_crypto).toBe(false);
       }
     });
 

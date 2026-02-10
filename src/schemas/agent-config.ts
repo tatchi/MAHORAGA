@@ -20,6 +20,7 @@ export const AgentConfigSchema = z
     position_size_pct_of_cash: z.number().min(1).max(100),
 
     // Entry quality gates (market-data based)
+    entry_gates_apply_to_crypto: z.boolean().default(false),
     entry_min_price: z.number().min(0).max(100000).default(2),
     entry_min_dollar_volume: z.number().min(0).max(1_000_000_000_000).default(10_000_000),
     entry_max_spread_bps: z.number().min(0).max(10000).default(50),
