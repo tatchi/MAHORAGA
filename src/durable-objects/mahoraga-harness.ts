@@ -1224,7 +1224,7 @@ export class MahoragaHarness extends DurableObject<Env> {
           if (request.method === "POST") {
             return this.handleUpdateConfig(request);
           }
-          return this.jsonResponse({ ok: true, data: this.state.config });
+          return this.jsonResponse({ ok: true, data: this.state.config, config: this.state.config });
 
         case "enable":
           return this.handleEnable();
@@ -1339,7 +1339,7 @@ export class MahoragaHarness extends DurableObject<Env> {
     this.state.config = result.data as unknown as AgentConfig;
     this.initializeLLM();
     await this.persist();
-    return this.jsonResponse({ ok: true, config: this.state.config });
+    return this.jsonResponse({ ok: true, data: this.state.config, config: this.state.config });
   }
 
   private async handleEnable(): Promise<Response> {
@@ -3347,7 +3347,7 @@ Response format:
       }
     }
 
-    if (regimeEnabled && regimeSymbol) {
+    if (!isCrypto && regimeEnabled && regimeSymbol) {
       let bars: Awaited<ReturnType<typeof alpaca.marketData.getBars>>;
       const requiredBars = Math.min(200, Math.max(2, regimeLookbackBars));
       try {
