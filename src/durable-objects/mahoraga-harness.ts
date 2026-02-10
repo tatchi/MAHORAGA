@@ -40,93 +40,15 @@ import type { Env } from "../env.d";
 import { createAlpacaProviders } from "../providers/alpaca";
 import { createLLMProvider } from "../providers/llm/factory";
 import type { Account, LLMProvider, MarketClock, Position } from "../providers/types";
-import { safeValidateAgentConfig } from "../schemas/agent-config";
+import { type AgentConfig, safeValidateAgentConfig } from "../schemas/agent-config";
 import { capByVolumeKeepingPinnedMap, capByVolumeKeepingPinnedRecord } from "./social-bounds";
 
 // ============================================================================
 // SECTION 1: TYPES & CONFIGURATION
 // ============================================================================
 // [CUSTOMIZABLE] Modify these interfaces to add new fields for custom data sources.
-// [CUSTOMIZABLE] AgentConfig contains ALL tunable parameters - start here!
+// [CUSTOMIZABLE] AgentConfig is defined/validated in `src/schemas/agent-config.ts` (Zod schema) - start there!
 // ============================================================================
-
-interface AgentConfig {
-  // Polling intervals - how often the agent checks for new data
-  data_poll_interval_ms: number; // [TUNE] Default: 30s. Lower = more API calls
-  analyst_interval_ms: number; // [TUNE] Default: 120s. How often to run trading logic
-
-  // Market-timing behavior (driven by Alpaca clock)
-  premarket_plan_window_minutes: number; // [TUNE] How many minutes before open to generate a plan (default: 5)
-  market_open_execute_window_minutes: number; // [TUNE] How many minutes after open to execute plan (default: 2)
-
-  // Position limits - risk management basics
-  max_position_value: number; // [TUNE] Max $ per position
-  max_positions: number; // [TUNE] Max concurrent positions
-  min_sentiment_score: number; // [TUNE] Min sentiment to consider buying (0-1)
-  min_analyst_confidence: number; // [TUNE] Min LLM confidence to execute (0-1)
-
-  // Risk management - take profit and stop loss
-  take_profit_pct: number; // [TUNE] Take profit at this % gain
-  stop_loss_pct: number; // [TUNE] Stop loss at this % loss
-  position_size_pct_of_cash: number; // [TUNE] % of cash per trade
-
-  // Entry quality gates (market-data based) - reduce trading on illiquid/noisy names
-  entry_gates_apply_to_crypto: boolean;
-  entry_min_price: number;
-  entry_min_dollar_volume: number;
-  entry_max_spread_bps: number;
-  entry_trend_timeframe: string;
-  entry_trend_lookback_bars: number;
-  entry_min_trend_return_pct: number;
-
-  // Market regime filter - avoid buying risk-on setups in weak tape
-  regime_filter_enabled: boolean;
-  regime_symbol: string;
-  regime_timeframe: string;
-  regime_lookback_bars: number;
-  regime_min_return_pct: number;
-
-  // Stale position management - exit positions that have lost momentum
-  stale_position_enabled: boolean;
-  stale_min_hold_hours: number; // [TUNE] Min hours before checking staleness
-  stale_max_hold_days: number; // [TUNE] Force exit after this many days
-  stale_min_gain_pct: number; // [TUNE] Required gain % to hold past max days
-  stale_mid_hold_days: number;
-  stale_mid_min_gain_pct: number;
-  stale_social_volume_decay: number; // [TUNE] Exit if volume drops to this % of entry
-
-  // LLM configuration
-  llm_provider: "openai-raw" | "ai-sdk" | "cloudflare-gateway"; // [TUNE] Provider: openai-raw, ai-sdk, cloudflare-gateway
-  llm_model: string; // [TUNE] Model for quick research (gpt-4o-mini)
-  llm_analyst_model: string; // [TUNE] Model for deep analysis (gpt-4o)
-  llm_min_hold_minutes: number; // [TUNE] Min minutes before LLM can recommend sell (default: 30)
-
-  // Options trading - trade options instead of shares for high-conviction plays
-  options_enabled: boolean; // [TOGGLE] Enable/disable options trading
-  options_min_confidence: number; // [TUNE] Higher threshold for options (riskier)
-  options_max_pct_per_trade: number;
-  options_min_dte: number; // [TUNE] Minimum days to expiration
-  options_max_dte: number; // [TUNE] Maximum days to expiration
-  options_target_delta: number; // [TUNE] Target delta (0.3-0.5 typical)
-  options_min_delta: number;
-  options_max_delta: number;
-  options_stop_loss_pct: number; // [TUNE] Options stop loss (wider than stocks)
-  options_take_profit_pct: number; // [TUNE] Options take profit (higher targets)
-
-  // Crypto trading - 24/7 momentum-based crypto trading
-  crypto_enabled: boolean; // [TOGGLE] Enable/disable crypto trading
-  crypto_symbols: string[]; // [TUNE] Which cryptos to trade (BTC/USD, etc.)
-  crypto_momentum_threshold: number; // [TUNE] Min % move to trigger signal
-  crypto_max_position_value: number;
-  crypto_take_profit_pct: number;
-  crypto_stop_loss_pct: number;
-
-  // Custom ticker blacklist - user-defined symbols to never trade (e.g., insider trading restrictions)
-  ticker_blacklist: string[];
-
-  // Allowed exchanges - only trade stocks listed on these exchanges (avoids OTC data issues)
-  allowed_exchanges: string[];
-}
 
 // [CUSTOMIZABLE] Add fields here when you add new data sources
 interface Signal {
@@ -3236,9 +3158,7 @@ Response format:
     const configuredTrendTimeframe = this.getConfigString("entry_trend_timeframe", "1Hour");
     const configuredTrendLookbackBars = Math.round(this.getConfigNumber("entry_trend_lookback_bars", 20));
     const trendTimeframe = isCrypto ? "1Day" : configuredTrendTimeframe;
-    const trendLookbackBars = isCrypto
-      ? Math.min(2, Math.max(0, configuredTrendLookbackBars))
-      : configuredTrendLookbackBars;
+    const trendLookbackBars = isCrypto ? 2 : configuredTrendLookbackBars;
     const minTrendReturnPct = this.getConfigNumber("entry_min_trend_return_pct", 0.5);
 
     const regimeEnabled = this.getConfigBoolean("regime_filter_enabled", false);
@@ -3290,14 +3210,21 @@ Response format:
     }
 
     const daily = snapshot.daily_bar || snapshot.prev_daily_bar;
-    const dailyDollarVolume = daily && daily.v > 0 ? daily.v * (daily.vw ?? daily.c) : 0;
-    if (isCrypto && !daily) {
-      // Some crypto snapshot shapes omit daily bars entirely; don't hard-block solely due to missing daily volume data.
-    } else if (dailyDollarVolume < minDollarVolume) {
+    const dailyVolume = typeof daily?.v === "number" && Number.isFinite(daily.v) && daily.v > 0 ? daily.v : 0;
+    const dailyPrice =
+      typeof daily?.vw === "number" && Number.isFinite(daily.vw)
+        ? daily.vw
+        : typeof daily?.c === "number" && Number.isFinite(daily.c)
+          ? daily.c
+          : null;
+    const dailyDollarVolume = dailyVolume > 0 && dailyPrice !== null ? dailyVolume * dailyPrice : null;
+    if (isCrypto && (dailyDollarVolume === null || !daily)) {
+      // Some crypto snapshot shapes omit daily bars (or omit vw/c); don't hard-block solely due to missing daily volume data.
+    } else if ((dailyDollarVolume ?? 0) < minDollarVolume) {
       return {
         ok: false,
         reason: "Dollar volume too low",
-        details: { dailyDollarVolume, minDollarVolume, dailyVolume: daily?.v ?? 0 },
+        details: { dailyDollarVolume: dailyDollarVolume ?? 0, minDollarVolume, dailyVolume: dailyVolume },
       };
     }
 
