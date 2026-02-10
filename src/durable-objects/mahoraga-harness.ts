@@ -3087,7 +3087,13 @@ Response format:
       if (!isCrypto) {
         const allowedExchanges = this.state.config.allowed_exchanges ?? ["NYSE", "NASDAQ", "ARCA", "AMEX", "BATS"];
         if (allowedExchanges.length > 0) {
-          const asset = await alpaca.trading.getAsset(symbol);
+          let asset: Awaited<ReturnType<typeof alpaca.trading.getAsset>>;
+          try {
+            asset = await alpaca.trading.getAsset(symbol);
+          } catch (error) {
+            this.log("Executor", "buy_blocked", { symbol, reason: "Asset lookup failed", error: String(error) });
+            return false;
+          }
           if (!asset) {
             this.log("Executor", "buy_blocked", { symbol, reason: "Asset not found" });
             return false;
@@ -3220,15 +3226,22 @@ Response format:
         : typeof daily?.c === "number" && Number.isFinite(daily.c)
           ? daily.c
           : null;
-    const dailyDollarVolume = dailyVolume > 0 && dailyPrice !== null ? dailyVolume * dailyPrice : null;
-    if (isCrypto && (dailyDollarVolume === null || !daily)) {
-      // Some crypto snapshot shapes omit daily bars (or omit vw/c); don't hard-block solely due to missing daily volume data.
-    } else if ((dailyDollarVolume ?? 0) < minDollarVolume) {
-      return {
-        ok: false,
-        reason: "Dollar volume too low",
-        details: { dailyDollarVolume: dailyDollarVolume ?? 0, minDollarVolume, dailyVolume: dailyVolume },
-      };
+    const dailyDollarVolume = dailyPrice !== null ? dailyVolume * dailyPrice : null;
+    if (minDollarVolume > 0) {
+      if (!daily || dailyDollarVolume === null) {
+        return {
+          ok: false,
+          reason: "Dollar volume unavailable",
+          details: { isCrypto, minDollarVolume, dailyVolume, dailyPrice, dailyDollarVolume },
+        };
+      }
+      if (!Number.isFinite(dailyDollarVolume) || dailyDollarVolume < minDollarVolume) {
+        return {
+          ok: false,
+          reason: "Dollar volume too low",
+          details: { dailyDollarVolume, minDollarVolume, dailyVolume, dailyPrice },
+        };
+      }
     }
 
     if (trendLookbackBars >= 2 && isCrypto) {
