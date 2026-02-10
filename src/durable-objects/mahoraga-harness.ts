@@ -3198,11 +3198,15 @@ Response format:
       Number.isFinite(ask) &&
       ask > 0;
     if (!hasQuote && maxSpreadBps < 10_000) {
-      return {
-        ok: false,
-        reason: "Quote unavailable (spread gate)",
-        details: { bid, ask, maxSpreadBps },
-      };
+      this.log("Executor", "buy_gate_skipped", {
+        symbol,
+        gate: "spread",
+        reason: "quote_unavailable",
+        bid,
+        ask,
+        maxSpreadBps,
+        isCrypto,
+      });
     }
     if (hasQuote && ask < bid) {
       return { ok: false, reason: "Invalid quote (ask below bid)", details: { bid, ask } };
@@ -3261,11 +3265,15 @@ Response format:
           };
         }
       } else {
-        return {
-          ok: false,
-          reason: "Trend bars unavailable (crypto daily bars missing)",
-          details: { first, last, trendTimeframe: "1Day", isCrypto },
-        };
+        this.log("Executor", "buy_gate_skipped", {
+          symbol,
+          gate: "trend",
+          reason: "crypto_daily_bars_missing",
+          first,
+          last,
+          trendTimeframe: "1Day",
+          isCrypto,
+        });
       }
     }
 
