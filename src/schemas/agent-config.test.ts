@@ -65,6 +65,31 @@ describe("AgentConfigSchema", () => {
       expect(result.success).toBe(true);
     });
 
+    it("accepts config missing entry-gates/regime fields (uses defaults)", () => {
+      const {
+        entry_min_price: _entryMinPrice,
+        entry_min_dollar_volume: _entryMinDollarVolume,
+        entry_max_spread_bps: _entryMaxSpreadBps,
+        entry_trend_timeframe: _entryTrendTimeframe,
+        entry_trend_lookback_bars: _entryTrendLookbackBars,
+        entry_min_trend_return_pct: _entryMinTrendReturnPct,
+        regime_filter_enabled: _regimeEnabled,
+        regime_symbol: _regimeSymbol,
+        regime_timeframe: _regimeTimeframe,
+        regime_lookback_bars: _regimeLookbackBars,
+        regime_min_return_pct: _regimeMinReturnPct,
+        ...legacy
+      } = createValidConfig();
+
+      const result = AgentConfigSchema.safeParse(legacy);
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.entry_trend_timeframe).toBe("1Hour");
+        expect(result.data.regime_timeframe).toBe("1Day");
+        expect(result.data.regime_filter_enabled).toBe(false);
+      }
+    });
+
     it("accepts all llm_provider values", () => {
       const providers = ["openai-raw", "ai-sdk", "cloudflare-gateway"] as const;
       for (const provider of providers) {

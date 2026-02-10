@@ -20,19 +20,19 @@ export const AgentConfigSchema = z
     position_size_pct_of_cash: z.number().min(1).max(100),
 
     // Entry quality gates (market-data based)
-    entry_min_price: z.number().min(0).max(100000),
-    entry_min_dollar_volume: z.number().min(0).max(1_000_000_000_000),
-    entry_max_spread_bps: z.number().min(0).max(10000),
-    entry_trend_timeframe: BarsTimeframeSchema,
-    entry_trend_lookback_bars: z.number().int().min(2).max(200),
-    entry_min_trend_return_pct: z.number().min(-100).max(100),
+    entry_min_price: z.number().min(0).max(100000).default(2),
+    entry_min_dollar_volume: z.number().min(0).max(1_000_000_000_000).default(10_000_000),
+    entry_max_spread_bps: z.number().min(0).max(10000).default(50),
+    entry_trend_timeframe: BarsTimeframeSchema.default("1Hour"),
+    entry_trend_lookback_bars: z.number().int().min(2).max(200).default(20),
+    entry_min_trend_return_pct: z.number().min(-100).max(100).default(0.5),
 
     // Market regime filter
-    regime_filter_enabled: z.boolean(),
-    regime_symbol: z.string().min(1),
-    regime_timeframe: BarsTimeframeSchema,
-    regime_lookback_bars: z.number().int().min(2).max(200),
-    regime_min_return_pct: z.number().min(-100).max(100),
+    regime_filter_enabled: z.boolean().default(false),
+    regime_symbol: z.string().min(1).default("SPY"),
+    regime_timeframe: BarsTimeframeSchema.default("1Day"),
+    regime_lookback_bars: z.number().int().min(2).max(200).default(50),
+    regime_min_return_pct: z.number().min(-100).max(100).default(0),
 
     stale_position_enabled: z.boolean(),
     stale_min_hold_hours: z.number().min(0).max(168),
