@@ -3180,6 +3180,19 @@ Response format:
 
       const applyGatesToCrypto = this.getConfigBoolean("entry_gates_apply_to_crypto", false);
       if (!isCrypto || applyGatesToCrypto) {
+        if (isCrypto && applyGatesToCrypto) {
+          const trendTimeframe = this.getConfigString("entry_trend_timeframe", "1Hour");
+          const trendLookbackBars = Math.round(this.getConfigNumber("entry_trend_lookback_bars", 20));
+          if (trendTimeframe !== "1Day" || trendLookbackBars !== 2) {
+            this.log("Executor", "crypto_gates_override", {
+              symbol: orderSymbol,
+              configured_trend_timeframe: trendTimeframe,
+              configured_trend_lookback_bars: trendLookbackBars,
+              effective_trend_timeframe: "1Day",
+              effective_trend_lookback_bars: 2,
+            });
+          }
+        }
         const gate = await this.preTradeGates(alpaca, symbol, { isCrypto });
         if (!gate.ok) {
           this.log("Executor", "buy_blocked", { symbol, reason: gate.reason, ...gate.details });
@@ -3260,10 +3273,11 @@ Response format:
 
     const bid = snapshot.latest_quote?.bid_price || 0;
     const ask = snapshot.latest_quote?.ask_price || 0;
-    const mid = bid > 0 && ask > 0 ? (bid + ask) / 2 : 0;
-    const spreadBps = mid > 0 ? ((ask - bid) / mid) * 10_000 : Number.POSITIVE_INFINITY;
+    const hasQuote = bid > 0 && ask > 0;
+    const mid = hasQuote ? (bid + ask) / 2 : 0;
+    const spreadBps = hasQuote && mid > 0 ? ((ask - bid) / mid) * 10_000 : null;
 
-    if (!Number.isFinite(spreadBps) || spreadBps > maxSpreadBps) {
+    if (spreadBps !== null && (!Number.isFinite(spreadBps) || spreadBps > maxSpreadBps)) {
       return {
         ok: false,
         reason: "Spread too wide",
@@ -3273,7 +3287,9 @@ Response format:
 
     const daily = snapshot.daily_bar || snapshot.prev_daily_bar;
     const dailyDollarVolume = daily && daily.v > 0 ? daily.v * (daily.vw || daily.c) : 0;
-    if (dailyDollarVolume < minDollarVolume) {
+    if (isCrypto && !daily) {
+      // Some crypto snapshot shapes omit daily bars entirely; don't hard-block solely due to missing daily volume data.
+    } else if (dailyDollarVolume < minDollarVolume) {
       return {
         ok: false,
         reason: "Dollar volume too low",
@@ -3290,15 +3306,11 @@ Response format:
           return {
             ok: false,
             reason: "Trend not confirmed",
-            details: { retPct, minTrendReturnPct, trendTimeframe, isCrypto, cryptoTrendSource: "daily_bar" },
+            details: { retPct, minTrendReturnPct, trendTimeframe: "1Day", isCrypto, cryptoTrendSource: "daily_bar" },
           };
         }
       } else {
-        return {
-          ok: false,
-          reason: "Trend bars unavailable (insufficient data)",
-          details: { trendTimeframe, isCrypto, cryptoTrendSource: "daily_bar" },
-        };
+        // Some crypto snapshot shapes don't include daily bars; don't hard-block solely due to missing trend bars.
       }
     }
 
