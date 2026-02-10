@@ -3264,6 +3264,9 @@ Response format:
     const bid = snapshot.latest_quote?.bid_price || 0;
     const ask = snapshot.latest_quote?.ask_price || 0;
     const hasQuote = bid > 0 && ask > 0;
+    if (hasQuote && ask < bid) {
+      return { ok: false, reason: "Invalid quote (ask below bid)", details: { bid, ask } };
+    }
     const mid = hasQuote ? (bid + ask) / 2 : 0;
     const spreadBps = hasQuote && mid > 0 ? ((ask - bid) / mid) * 10_000 : null;
 
