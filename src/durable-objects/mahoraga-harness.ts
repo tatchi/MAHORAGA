@@ -933,7 +933,6 @@ export class MahoragaHarness extends DurableObject<Env> {
           issues: validatedConfig.error.issues,
         });
         this.state.config = { ...DEFAULT_STATE.config };
-        await this.persist();
       }
       this.sanitizePersistedSocialState(Date.now());
       this.initializeLLM();
@@ -1325,10 +1324,7 @@ export class MahoragaHarness extends DurableObject<Env> {
   private async handleUpdateConfig(request: Request): Promise<Response> {
     const body = (await request.json().catch(() => null)) as unknown;
     if (!body || typeof body !== "object" || Array.isArray(body)) {
-      return new Response(JSON.stringify({ ok: false, error: "Invalid JSON body (expected object)" }, null, 2), {
-        status: 400,
-        headers: { "Content-Type": "application/json" },
-      });
+      return this.jsonResponse({ ok: false, error: "Invalid JSON body (expected object)" }, { status: 400 });
     }
     const candidate = {
       ...(this.state.config as unknown as Record<string, unknown>),
@@ -1336,10 +1332,7 @@ export class MahoragaHarness extends DurableObject<Env> {
     };
     const result = safeValidateAgentConfig(candidate);
     if (!result.success) {
-      return new Response(JSON.stringify({ ok: false, issues: result.error.issues }, null, 2), {
-        status: 400,
-        headers: { "Content-Type": "application/json" },
-      });
+      return this.jsonResponse({ ok: false, issues: result.error.issues }, { status: 400 });
     }
     this.state.config = result.data as unknown as AgentConfig;
     this.initializeLLM();
@@ -3872,10 +3865,9 @@ Response format:
     }
   }
 
-  private jsonResponse(data: unknown): Response {
-    return new Response(JSON.stringify(data, null, 2), {
-      headers: { "Content-Type": "application/json" },
-    });
+  private jsonResponse(data: unknown, init: ResponseInit = {}): Response {
+    const headers: HeadersInit = { "Content-Type": "application/json", ...(init.headers ?? {}) };
+    return new Response(JSON.stringify(data, null, 2), { ...init, headers });
   }
 
   private sleep(ms: number): Promise<void> {
