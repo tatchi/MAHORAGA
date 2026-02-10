@@ -99,6 +99,15 @@ describe("AgentConfigSchema", () => {
       }
     });
 
+    it("accepts config missing allowed_exchanges (uses default)", () => {
+      const { allowed_exchanges: _allowedExchanges, ...legacy } = createValidConfig();
+      const result = AgentConfigSchema.safeParse(legacy);
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.allowed_exchanges).toEqual(["NYSE", "NASDAQ", "ARCA", "AMEX", "BATS"]);
+      }
+    });
+
     it("accepts all llm_provider values", () => {
       const providers = ["openai-raw", "ai-sdk", "cloudflare-gateway"] as const;
       for (const provider of providers) {
