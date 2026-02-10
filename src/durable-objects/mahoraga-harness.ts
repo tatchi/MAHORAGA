@@ -1188,10 +1188,7 @@ export class MahoragaHarness extends DurableObject<Env> {
           return new Response("Not found", { status: 404 });
       }
     } catch (error) {
-      return new Response(JSON.stringify({ error: String(error) }), {
-        status: 500,
-        headers: { "Content-Type": "application/json" },
-      });
+      return this.jsonResponse({ ok: false, error: String(error) }, { status: 500 });
     }
   }
 
