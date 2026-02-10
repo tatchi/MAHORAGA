@@ -3292,7 +3292,7 @@ Response format:
     }
 
     const daily = snapshot.daily_bar || snapshot.prev_daily_bar;
-    const dailyDollarVolume = daily && daily.v > 0 ? daily.v * (daily.vw || daily.c) : 0;
+    const dailyDollarVolume = daily && daily.v > 0 ? daily.v * (daily.vw ?? daily.c) : 0;
     if (isCrypto && !daily) {
       // Some crypto snapshot shapes omit daily bars entirely; don't hard-block solely due to missing daily volume data.
     } else if (dailyDollarVolume < minDollarVolume) {
