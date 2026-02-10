@@ -3180,21 +3180,6 @@ Response format:
 
       const applyGatesToCrypto = this.getConfigBoolean("entry_gates_apply_to_crypto", false);
       if (!isCrypto || applyGatesToCrypto) {
-        if (isCrypto && applyGatesToCrypto) {
-          const trendTimeframe = this.getConfigString("entry_trend_timeframe", "1Hour");
-          const trendLookbackBars = Math.round(this.getConfigNumber("entry_trend_lookback_bars", 20));
-          const effectiveTrendTimeframe = "1Day";
-          const effectiveTrendLookbackBars = Math.min(2, Math.max(0, trendLookbackBars));
-          if (trendTimeframe !== effectiveTrendTimeframe || trendLookbackBars !== effectiveTrendLookbackBars) {
-            this.log("Executor", "crypto_gates_override", {
-              symbol: orderSymbol,
-              configured_trend_timeframe: trendTimeframe,
-              configured_trend_lookback_bars: trendLookbackBars,
-              effective_trend_timeframe: effectiveTrendTimeframe,
-              effective_trend_lookback_bars: effectiveTrendLookbackBars,
-            });
-          }
-        }
         const gate = await this.preTradeGates(alpaca, symbol, { isCrypto });
         if (!gate.ok) {
           this.log("Executor", "buy_blocked", { symbol, reason: gate.reason, ...gate.details });
