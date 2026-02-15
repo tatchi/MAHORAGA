@@ -155,6 +155,7 @@ export class MahoragaHarness extends DurableObject<Env> {
       log: (agent, action, details) => self.log(agent, action, details),
       cryptoSymbols: self.state.config.crypto_symbols || [],
       allowedExchanges: self.state.config.allowed_exchanges ?? ["NYSE", "NASDAQ", "ARCA", "AMEX", "BATS"],
+      getLocalEntryPrice: (symbol) => self.state.positionEntries[symbol]?.entry_price ?? null,
       onSell: (symbol, _reason, orderId, entryPrice) => {
         // Store pending sell for P&L computation in reconcileOrders() on fill.
         // Clean up local state immediately — position is being closed.
@@ -451,6 +452,15 @@ export class MahoragaHarness extends DurableObject<Env> {
               pending.entryPrice !== null && pending.entryPrice > 0 && filledPrice > 0
                 ? filledPrice - pending.entryPrice
                 : 0;
+
+            if (realizedPl < 0 && !db) {
+              this.log("Reconcile", "loss_not_recorded_no_db", {
+                symbol: pending.symbol,
+                orderId,
+                realizedPl,
+                note: "Database unavailable — daily loss tracking skipped",
+              });
+            }
 
             if (realizedPl < 0 && db) {
               const filledQty = parseFloat(order.filled_qty ?? "");

@@ -33,6 +33,8 @@ export interface PolicyBrokerDeps {
   onBuy?: (symbol: string, notional: number) => void;
   /** Called after a sell order is submitted. Returns the order ID for reconciliation tracking. */
   onSell?: (symbol: string, reason: string, orderId: string, entryPrice: number | null) => void;
+  /** Local entry price lookup — fallback when position is gone from broker (race with external close). */
+  getLocalEntryPrice?: (symbol: string) => number | null;
 }
 
 /**
@@ -216,15 +218,17 @@ export function createPolicyBroker(deps: PolicyBrokerDeps): StrategyContext["bro
         }
       }
 
-      // Snapshot entry price BEFORE close for P&L computation in reconciliation
+      // Snapshot entry price BEFORE close for P&L computation in reconciliation.
+      // Try broker positions first, fall back to local state to handle race
+      // where position was closed externally between getPositions() and closePosition().
       const positionsBeforeClose = await getPositions();
       const closingPosition = positionsBeforeClose.find((p) => p.symbol === symbol);
-      const entryPrice = closingPosition?.avg_entry_price ?? null;
+      const entryPrice = closingPosition?.avg_entry_price ?? deps.getLocalEntryPrice?.(symbol) ?? null;
       if (entryPrice === null) {
         log("PolicyBroker", "sell_entry_price_unknown", {
           symbol,
           reason,
-          note: "Position not found in broker — P&L will be skipped for this sell",
+          note: "Position not found in broker or local state — P&L will be skipped for this sell",
         });
       }
 
