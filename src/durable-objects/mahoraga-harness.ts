@@ -66,6 +66,11 @@ export class MahoragaHarness extends DurableObject<Env> {
     this.ctx.blockConcurrencyWhile(async () => {
       const stored = await this.ctx.storage.get<AgentState>("state");
       if (stored) {
+        if (!("pendingOrders" in stored)) {
+          console.log(
+            "[MahoragaHarness] MIGRATION: stored state missing pendingOrders — any orders from previous version will not be reconciled. Verify all prior orders are terminal before deploying."
+          );
+        }
         this.state = { ...DEFAULT_STATE, ...stored };
         this.state.config = { ...DEFAULT_STATE.config, ...this.state.config };
       }
