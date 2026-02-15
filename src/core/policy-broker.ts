@@ -262,7 +262,7 @@ export function createPolicyBroker(deps: PolicyBrokerDeps): StrategyContext["bro
 
     const preview: OptionsOrderPreview = {
       contract_symbol: contract.symbol,
-      underlying: contract.symbol, // best-effort; policy checks don't use underlying directly
+      underlying: contract.underlying,
       side: "buy",
       qty,
       order_type: "limit",

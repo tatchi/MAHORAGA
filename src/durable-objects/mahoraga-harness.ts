@@ -277,6 +277,9 @@ export class MahoragaHarness extends DurableObject<Env> {
       // Reconcile pending orders (check for fills / terminal states)
       if (Object.keys(this.state.pendingOrders).length > 0) {
         await this.reconcileOrders();
+        // Persist immediately so fill-side-effects (positionEntries mutations,
+        // recordDailyLoss/setCooldown) survive a crash before end-of-alarm persist.
+        await this.persist();
       }
 
       // Crypto trading (24/7)

@@ -10,6 +10,7 @@ import type { StrategyContext } from "../../types";
 
 export interface OptionsContract {
   symbol: string;
+  underlying: string;
   strike: number;
   expiration: string;
   delta: number;
@@ -119,6 +120,7 @@ export async function findBestOptionsContract(
 
       return {
         symbol: contract.symbol,
+        underlying: symbol,
         strike: contract.strike,
         expiration: bestExpiration,
         delta: delta!,
