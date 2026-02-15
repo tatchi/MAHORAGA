@@ -260,7 +260,7 @@ export function createPolicyBroker(deps: PolicyBrokerDeps): StrategyContext["bro
     if (qty < 1 || !Number.isFinite(qty) || !Number.isInteger(qty)) {
       log("PolicyBroker", "buy_option_blocked", {
         symbol: contract.symbol,
-        reason: "Invalid quantity",
+        reason: "Invalid quantity - options must be whole contracts",
         qty,
       });
       return null;
