@@ -418,9 +418,10 @@ export class MahoragaHarness extends DurableObject<Env> {
           }
 
           if (pending.side === "buy") {
-            // Buy filled — create PositionEntry with real fill price
-            this.state.positionEntries[pending.symbol] = {
-              symbol: pending.symbol,
+            // Buy filled — create PositionEntry keyed by underlying for options, symbol for equities
+            const entryKey = pending.underlying ?? pending.symbol;
+            this.state.positionEntries[entryKey] = {
+              symbol: entryKey,
               entry_time: pending.submittedAt,
               entry_price: filledPrice,
               entry_sentiment: pending.entryMeta.sentiment,
@@ -992,6 +993,7 @@ export class MahoragaHarness extends DurableObject<Env> {
               side: "buy",
               orderId: optResult.orderId,
               symbol: contract.symbol,
+              underlying: contract.underlying,
               notional: contract.mid_price * 100, // 1 contract = 100 shares
               reason: entry.reason,
               submittedAt: Date.now(),

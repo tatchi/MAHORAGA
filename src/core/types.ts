@@ -80,6 +80,8 @@ export interface PendingBuyOrder {
   submittedAt: number;
   /** Consecutive getOrder() failures. Cleaned up at MAX_POLL_FAILURES. */
   pollFailures?: number;
+  /** Underlying symbol for options orders — used as positionEntries key instead of OCC symbol. */
+  underlying?: string;
   /** Metadata to populate PositionEntry on fill */
   entryMeta: {
     sentiment: number;
