@@ -436,21 +436,30 @@ export class MahoragaHarness extends DurableObject<Env> {
             const realizedPl = pending.entryPrice > 0 && filledPrice > 0 ? filledPrice - pending.entryPrice : 0;
 
             if (realizedPl < 0 && db) {
-              const lossUsd = Math.abs(realizedPl) * parseFloat(order.filled_qty || "0");
-              if (lossUsd > 0) {
-                await recordDailyLoss(db, lossUsd);
-                const cooldownMinutes = this.state.config.cooldown_minutes_after_loss ?? 15;
-                if (cooldownMinutes > 0) {
-                  const cooldownUntil = new Date(now + cooldownMinutes * 60 * 1000).toISOString();
-                  await setCooldown(db, cooldownUntil);
-                }
-                this.log("Reconcile", "daily_loss_recorded", {
+              const filledQty = parseFloat(order.filled_qty ?? "");
+              if (!Number.isFinite(filledQty) || filledQty <= 0) {
+                this.log("Reconcile", "sell_filled_qty_invalid", {
                   symbol: pending.symbol,
-                  lossPerShare: realizedPl,
+                  orderId,
                   filledQty: order.filled_qty,
-                  lossUsd,
-                  cooldownMinutes: this.state.config.cooldown_minutes_after_loss ?? 15,
                 });
+              } else {
+                const lossUsd = Math.abs(realizedPl) * filledQty;
+                if (lossUsd > 0) {
+                  await recordDailyLoss(db, lossUsd);
+                  const cooldownMinutes = this.state.config.cooldown_minutes_after_loss ?? 15;
+                  if (cooldownMinutes > 0) {
+                    const cooldownUntil = new Date(now + cooldownMinutes * 60 * 1000).toISOString();
+                    await setCooldown(db, cooldownUntil);
+                  }
+                  this.log("Reconcile", "daily_loss_recorded", {
+                    symbol: pending.symbol,
+                    lossPerShare: realizedPl,
+                    filledQty,
+                    lossUsd,
+                    cooldownMinutes: this.state.config.cooldown_minutes_after_loss ?? 15,
+                  });
+                }
               }
             }
 
