@@ -899,7 +899,26 @@ export class MahoragaHarness extends DurableObject<Env> {
       if (entry.useOptions) {
         const contract = await findBestOptionsContract(ctx, entry.symbol, "bullish", account.equity);
         if (contract) {
-          await ctx.broker.buyOption(contract, 1, entry.reason);
+          const optResult = await ctx.broker.buyOption(contract, 1, entry.reason);
+          if (optResult) {
+            heldSymbols.add(entry.symbol);
+            const originalSignal = this.state.signalCache.find((s) => s.symbol === entry.symbol);
+            const aggregatedSocial = socialSnapshot[entry.symbol];
+            this.state.pendingOrders[contract.symbol] = {
+              orderId: optResult.orderId,
+              symbol: contract.symbol,
+              notional: contract.mid_price * 100, // 1 contract = 100 shares
+              reason: entry.reason,
+              submittedAt: Date.now(),
+              entryMeta: {
+                sentiment: aggregatedSocial?.sentiment ?? originalSignal?.sentiment ?? finalConfidence,
+                socialVolume: aggregatedSocial?.volume ?? originalSignal?.volume ?? 0,
+                sources: aggregatedSocial
+                  ? aggregatedSocial.sources
+                  : originalSignal?.subreddits || [originalSignal?.source || "research"],
+              },
+            };
+          }
         }
         continue;
       }

@@ -42,8 +42,8 @@ Derived from `CODE-REVIEW.md` changes 1-3. Each task is atomic and independently
 
 ### Integration (blocked by earlier tasks)
 
-- [ ] **Track options in reconciliation** `[blocked by: "Add order lifecycle reconciliation" + "Route options through PolicyEngine"]`
-  Store options buys in `pendingOrders` from `buyOption()` result. Reconciliation loop handles options fills identically to equity.
+- [x] **Track options in reconciliation** `[blocked by: "Add order lifecycle reconciliation" + "Route options through PolicyEngine"]`
+  Store options buys in `pendingOrders` from `buyOption()` result, keyed by OCC contract symbol. Reconciliation loop handles options fills identically to equity.
   Files: `src/durable-objects/mahoraga-harness.ts`
 
 - [ ] **Move P&L computation to reconciliation loop** `[blocked by: "Add order lifecycle reconciliation" + "Wire daily loss tracking on sell"]`
