@@ -31,7 +31,7 @@ export interface PolicyBrokerDeps {
   allowedExchanges: string[];
   /** Called after a successful buy order */
   onBuy?: (symbol: string, notional: number) => void;
-  /** Called after a sell order is submitted. Returns the order ID for reconciliation tracking. */
+  /** Called after a sell order is submitted; receives the order ID for reconciliation tracking. */
   onSell?: (symbol: string, reason: string, orderId: string, entryPrice: number | null) => void;
   /** Local entry price lookup — fallback when position is gone from broker (race with external close). */
   getLocalEntryPrice?: (symbol: string) => number | null;
@@ -257,7 +257,7 @@ export function createPolicyBroker(deps: PolicyBrokerDeps): StrategyContext["bro
       log("PolicyBroker", "buy_option_blocked", { reason: "Empty contract symbol" });
       return null;
     }
-    if (qty < 1 || !Number.isFinite(qty)) {
+    if (qty < 1 || !Number.isFinite(qty) || !Number.isInteger(qty)) {
       log("PolicyBroker", "buy_option_blocked", {
         symbol: contract.symbol,
         reason: "Invalid quantity",

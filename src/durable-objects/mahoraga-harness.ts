@@ -408,13 +408,26 @@ export class MahoragaHarness extends DurableObject<Env> {
           const filledPrice = order.filled_avg_price ? parseFloat(order.filled_avg_price) : 0;
 
           if (filledPrice <= 0) {
-            this.log("Reconcile", "filled_missing_price", {
-              symbol: pending.symbol,
-              orderId,
-              side: pending.side,
-              rawPrice: order.filled_avg_price,
-            });
-            delete this.state.pendingOrders[orderId];
+            const failures = (pending.pollFailures ?? 0) + 1;
+            if (failures >= MAX_POLL_FAILURES) {
+              this.log("Reconcile", "filled_missing_price_abandoned", {
+                symbol: pending.symbol,
+                orderId,
+                side: pending.side,
+                failures,
+                rawPrice: order.filled_avg_price,
+              });
+              delete this.state.pendingOrders[orderId];
+            } else {
+              pending.pollFailures = failures;
+              this.log("Reconcile", "filled_missing_price", {
+                symbol: pending.symbol,
+                orderId,
+                side: pending.side,
+                failures,
+                rawPrice: order.filled_avg_price,
+              });
+            }
             continue;
           }
 
