@@ -11,13 +11,14 @@
 
 import { DurableObject } from "cloudflare:workers";
 import { createPolicyBroker } from "../core/policy-broker";
-import type {
-  AgentState,
-  LogEntry,
-  ResearchResult,
-  Signal,
-  SocialHistoryEntry,
-  SocialSnapshotCacheEntry,
+import {
+  type AgentState,
+  type LogEntry,
+  type ResearchResult,
+  type Signal,
+  type SocialHistoryEntry,
+  type SocialSnapshotCacheEntry,
+  TERMINAL_ORDER_STATUSES,
 } from "../core/types";
 import type { Env } from "../env.d";
 import { getDefaultPolicyConfig } from "../policy/config";
@@ -261,6 +262,11 @@ export class MahoragaHarness extends DurableObject<Env> {
         }
       }
 
+      // Reconcile pending orders (check for fills / terminal states)
+      if (Object.keys(this.state.pendingOrders).length > 0) {
+        await this.reconcileOrders();
+      }
+
       // Crypto trading (24/7)
       if (this.state.config.crypto_enabled) {
         await runCryptoTrading(ctx, positions);
@@ -340,6 +346,83 @@ export class MahoragaHarness extends DurableObject<Env> {
   private async scheduleNextAlarm(): Promise<void> {
     const nextRun = Date.now() + 30_000;
     await this.ctx.storage.setAlarm(nextRun);
+  }
+
+  // ============================================================================
+  // ORDER RECONCILIATION — poll pending orders for fills / terminal states
+  // ============================================================================
+
+  /**
+   * For each pending order, poll Alpaca for current status:
+   * - `filled`: create PositionEntry with real filled_avg_price, remove from pending
+   * - Other terminal state: log and remove from pending
+   * - Still active: keep pending (will retry next alarm tick)
+   *
+   * Orders older than 10 minutes are treated as stale and cleaned up.
+   */
+  private async reconcileOrders(): Promise<void> {
+    const alpaca = createAlpacaProviders(this.env);
+    const STALE_ORDER_MS = 10 * 60 * 1000;
+    const now = Date.now();
+
+    for (const [symbol, pending] of Object.entries(this.state.pendingOrders)) {
+      // Clean up stale orders that have been pending too long
+      if (now - pending.submittedAt > STALE_ORDER_MS) {
+        this.log("Reconcile", "order_stale", {
+          symbol,
+          orderId: pending.orderId,
+          ageMs: now - pending.submittedAt,
+        });
+        delete this.state.pendingOrders[symbol];
+        continue;
+      }
+
+      try {
+        const order = await alpaca.trading.getOrder(pending.orderId);
+
+        if (order.status === "filled") {
+          const filledPrice = order.filled_avg_price ? parseFloat(order.filled_avg_price) : 0;
+
+          this.state.positionEntries[symbol] = {
+            symbol,
+            entry_time: pending.submittedAt,
+            entry_price: filledPrice,
+            entry_sentiment: pending.entryMeta.sentiment,
+            entry_social_volume: pending.entryMeta.socialVolume,
+            entry_sources: pending.entryMeta.sources,
+            entry_reason: pending.reason,
+            peak_price: filledPrice,
+            peak_sentiment: pending.entryMeta.sentiment,
+          };
+
+          this.log("Reconcile", "order_filled", {
+            symbol,
+            orderId: pending.orderId,
+            filledPrice,
+          });
+
+          delete this.state.pendingOrders[symbol];
+          continue;
+        }
+
+        if (TERMINAL_ORDER_STATUSES.has(order.status)) {
+          this.log("Reconcile", "order_terminal", {
+            symbol,
+            orderId: pending.orderId,
+            status: order.status,
+          });
+          delete this.state.pendingOrders[symbol];
+        }
+
+        // Still active — leave in pendingOrders for next tick
+      } catch (error) {
+        this.log("Reconcile", "order_poll_error", {
+          symbol,
+          orderId: pending.orderId,
+          error: String(error),
+        });
+      }
+    }
   }
 
   // ============================================================================
@@ -810,18 +893,19 @@ export class MahoragaHarness extends DurableObject<Env> {
         heldSymbols.add(entry.symbol);
         const originalSignal = this.state.signalCache.find((s) => s.symbol === entry.symbol);
         const aggregatedSocial = socialSnapshot[entry.symbol];
-        this.state.positionEntries[entry.symbol] = {
+        this.state.pendingOrders[entry.symbol] = {
+          orderId: result.orderId,
           symbol: entry.symbol,
-          entry_time: Date.now(),
-          entry_price: 0,
-          entry_sentiment: aggregatedSocial?.sentiment ?? originalSignal?.sentiment ?? finalConfidence,
-          entry_social_volume: aggregatedSocial?.volume ?? originalSignal?.volume ?? 0,
-          entry_sources: aggregatedSocial
-            ? aggregatedSocial.sources
-            : originalSignal?.subreddits || [originalSignal?.source || "research"],
-          entry_reason: entry.reason,
-          peak_price: 0,
-          peak_sentiment: aggregatedSocial?.sentiment ?? originalSignal?.sentiment ?? finalConfidence,
+          notional: entry.notional,
+          reason: entry.reason,
+          submittedAt: Date.now(),
+          entryMeta: {
+            sentiment: aggregatedSocial?.sentiment ?? originalSignal?.sentiment ?? finalConfidence,
+            socialVolume: aggregatedSocial?.volume ?? originalSignal?.volume ?? 0,
+            sources: aggregatedSocial
+              ? aggregatedSocial.sources
+              : originalSignal?.subreddits || [originalSignal?.source || "research"],
+          },
         };
       }
     }
@@ -877,18 +961,19 @@ export class MahoragaHarness extends DurableObject<Env> {
           const originalSignal = this.state.signalCache.find((s) => s.symbol === rec.symbol);
           const aggregatedSocial = socialSnapshot[rec.symbol];
           heldSymbols.add(rec.symbol);
-          this.state.positionEntries[rec.symbol] = {
+          this.state.pendingOrders[rec.symbol] = {
+            orderId: result.orderId,
             symbol: rec.symbol,
-            entry_time: Date.now(),
-            entry_price: 0,
-            entry_sentiment: aggregatedSocial?.sentiment ?? originalSignal?.sentiment ?? rec.confidence,
-            entry_social_volume: aggregatedSocial?.volume ?? originalSignal?.volume ?? 0,
-            entry_sources: aggregatedSocial
-              ? aggregatedSocial.sources
-              : originalSignal?.subreddits || [originalSignal?.source || "analyst"],
-            entry_reason: rec.reasoning,
-            peak_price: 0,
-            peak_sentiment: aggregatedSocial?.sentiment ?? originalSignal?.sentiment ?? rec.confidence,
+            notional,
+            reason: rec.reasoning,
+            submittedAt: Date.now(),
+            entryMeta: {
+              sentiment: aggregatedSocial?.sentiment ?? originalSignal?.sentiment ?? rec.confidence,
+              socialVolume: aggregatedSocial?.volume ?? originalSignal?.volume ?? 0,
+              sources: aggregatedSocial
+                ? aggregatedSocial.sources
+                : originalSignal?.subreddits || [originalSignal?.source || "analyst"],
+            },
           };
         }
       }
@@ -1022,23 +1107,25 @@ export class MahoragaHarness extends DurableObject<Env> {
         );
         if (notional < 100) continue;
 
-        const result = await ctx.broker.buy(rec.symbol, notional, `Pre-market plan: ${rec.reasoning}`);
+        const reason = `Pre-market plan: ${rec.reasoning}`;
+        const result = await ctx.broker.buy(rec.symbol, notional, reason);
         if (result) {
           heldSymbols.add(rec.symbol);
           const originalSignal = this.state.signalCache.find((s) => s.symbol === rec.symbol);
           const aggregatedSocial = socialSnapshot[rec.symbol];
-          this.state.positionEntries[rec.symbol] = {
+          this.state.pendingOrders[rec.symbol] = {
+            orderId: result.orderId,
             symbol: rec.symbol,
-            entry_time: Date.now(),
-            entry_price: 0,
-            entry_sentiment: aggregatedSocial?.sentiment ?? originalSignal?.sentiment ?? 0,
-            entry_social_volume: aggregatedSocial?.volume ?? originalSignal?.volume ?? 0,
-            entry_sources: aggregatedSocial
-              ? aggregatedSocial.sources
-              : originalSignal?.subreddits || [originalSignal?.source || "premarket"],
-            entry_reason: rec.reasoning,
-            peak_price: 0,
-            peak_sentiment: aggregatedSocial?.sentiment ?? originalSignal?.sentiment ?? 0,
+            notional,
+            reason,
+            submittedAt: Date.now(),
+            entryMeta: {
+              sentiment: aggregatedSocial?.sentiment ?? originalSignal?.sentiment ?? 0,
+              socialVolume: aggregatedSocial?.volume ?? originalSignal?.volume ?? 0,
+              sources: aggregatedSocial
+                ? aggregatedSocial.sources
+                : originalSignal?.subreddits || [originalSignal?.source || "premarket"],
+            },
           };
         }
       }
@@ -1195,6 +1282,7 @@ export class MahoragaHarness extends DurableObject<Env> {
         signalResearch: this.state.signalResearch,
         positionResearch: this.state.positionResearch,
         positionEntries: this.state.positionEntries,
+        pendingOrders: this.state.pendingOrders,
         twitterConfirmations: this.state.twitterConfirmations,
         premarketPlan: this.state.premarketPlan,
         stalenessAnalysis: this.state.stalenessAnalysis,

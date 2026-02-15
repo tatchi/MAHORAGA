@@ -54,8 +54,8 @@ export interface StrategyContext {
     getAccount(): Promise<Account>;
     getPositions(): Promise<Position[]>;
     getClock(): Promise<MarketClock>;
-    /** Execute a buy. Returns true if the order was submitted. */
-    buy(symbol: string, notional: number, reason: string): Promise<boolean>;
+    /** Execute a buy. Returns the order id on success, null on rejection/failure. */
+    buy(symbol: string, notional: number, reason: string): Promise<{ orderId: string } | null>;
     /** Close a position. Returns true if the close was submitted. */
     sell(symbol: string, reason: string): Promise<boolean>;
   };

@@ -96,6 +96,7 @@ export const DEFAULT_STATE: AgentState = {
   config: DEFAULT_CONFIG,
   signalCache: [],
   positionEntries: {},
+  pendingOrders: {},
   socialHistory: {},
   socialSnapshotCache: {},
   socialSnapshotCacheUpdatedAt: 0,

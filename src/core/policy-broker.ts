@@ -5,7 +5,8 @@
  * directly, bypassing kill switch, daily loss limits, position concentration, etc.
  * Now all trades (buy AND sell) go through PolicyEngine.evaluate() first.
  *
- * Strategies call ctx.broker.buy()/sell() and get back true/false.
+ * Strategies call ctx.broker.buy()/sell(). buy() returns { orderId } on
+ * submission (null on rejection); sell() returns boolean.
  * They cannot bypass these safety checks.
  */
 
@@ -83,15 +84,15 @@ export function createPolicyBroker(deps: PolicyBrokerDeps): StrategyContext["bro
     return getRiskState(db);
   }
 
-  async function buy(symbol: string, notional: number, reason: string): Promise<boolean> {
+  async function buy(symbol: string, notional: number, reason: string): Promise<{ orderId: string } | null> {
     if (!symbol || symbol.trim().length === 0) {
       log("PolicyBroker", "buy_blocked", { reason: "Empty symbol" });
-      return false;
+      return null;
     }
 
     if (notional <= 0 || !Number.isFinite(notional)) {
       log("PolicyBroker", "buy_blocked", { symbol, reason: "Invalid notional", notional });
-      return false;
+      return null;
     }
 
     const isCrypto = isCryptoSymbol(symbol, deps.cryptoSymbols);
@@ -105,7 +106,7 @@ export function createPolicyBroker(deps: PolicyBrokerDeps): StrategyContext["bro
         const asset = await alpaca.trading.getAsset(symbol);
         if (!asset) {
           log("PolicyBroker", "buy_blocked", { symbol, reason: "Asset not found" });
-          return false;
+          return null;
         }
         if (!deps.allowedExchanges.includes(asset.exchange)) {
           log("PolicyBroker", "buy_blocked", {
@@ -113,11 +114,11 @@ export function createPolicyBroker(deps: PolicyBrokerDeps): StrategyContext["bro
             reason: "Exchange not allowed",
             exchange: asset.exchange,
           });
-          return false;
+          return null;
         }
       } catch {
         log("PolicyBroker", "buy_blocked", { symbol, reason: "Asset lookup failed" });
-        return false;
+        return null;
       }
     }
 
@@ -148,7 +149,7 @@ export function createPolicyBroker(deps: PolicyBrokerDeps): StrategyContext["bro
           notional,
           violations: result.violations.map((v) => v.message),
         });
-        return false;
+        return null;
       }
 
       if (result.warnings.length > 0) {
@@ -180,10 +181,10 @@ export function createPolicyBroker(deps: PolicyBrokerDeps): StrategyContext["bro
       cachedPositions = null;
 
       deps.onBuy?.(symbol, notional);
-      return true;
+      return { orderId: alpacaOrder.id };
     } catch (error) {
       log("PolicyBroker", "buy_failed", { symbol, error: String(error) });
-      return false;
+      return null;
     }
   }
 

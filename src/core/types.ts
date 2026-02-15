@@ -5,7 +5,9 @@
  */
 
 // Re-export provider types that strategies need
-export type { Account, LLMProvider, MarketClock, Position } from "../providers/types";
+export type { Account, LLMProvider, MarketClock, OrderStatus, Position } from "../providers/types";
+
+import type { OrderStatus } from "../providers/types";
 
 // Re-export config types
 export type { AgentConfig } from "../schemas/agent-config";
@@ -52,6 +54,34 @@ export interface PositionEntry {
   entry_reason: string;
   peak_price: number;
   peak_sentiment: number;
+}
+
+// ---------------------------------------------------------------------------
+// Pending order — tracks submitted orders awaiting fill confirmation
+// ---------------------------------------------------------------------------
+
+/** Terminal order states where no further status change is expected. */
+export const TERMINAL_ORDER_STATUSES: ReadonlySet<OrderStatus> = new Set<OrderStatus>([
+  "filled",
+  "canceled",
+  "expired",
+  "replaced",
+  "rejected",
+  "suspended",
+]);
+
+export interface PendingOrder {
+  orderId: string;
+  symbol: string;
+  notional: number;
+  reason: string;
+  submittedAt: number;
+  /** Metadata to populate PositionEntry on fill */
+  entryMeta: {
+    sentiment: number;
+    socialVolume: number;
+    sources: string[];
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -138,6 +168,7 @@ export interface AgentState {
   config: import("../schemas/agent-config").AgentConfig;
   signalCache: Signal[];
   positionEntries: Record<string, PositionEntry>;
+  pendingOrders: Record<string, PendingOrder>;
   socialHistory: Record<string, SocialHistoryEntry[]>;
   socialSnapshotCache: Record<string, SocialSnapshotCacheEntry>;
   socialSnapshotCacheUpdatedAt: number;

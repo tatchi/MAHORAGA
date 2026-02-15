@@ -24,13 +24,9 @@ Derived from `CODE-REVIEW.md` changes 1-3. Each task is atomic and independently
   After fetching positions in alarm loop, update `positionEntries[symbol].peak_price` via `Math.max`. Also defensively backfill `entry_price` from `pos.avg_entry_price` when still 0. Also fixed status handler to use same improved logic.
   Files: `src/durable-objects/mahoraga-harness.ts`
 
-- [ ] **Add order lifecycle reconciliation**
-  - Add `PendingOrder` type to `src/core/types.ts`, add `pendingOrders: Record<string, PendingOrder>` to `AgentState`
-  - Change `PolicyBroker.buy()` return from `Promise<boolean>` to `Promise<{ orderId: string } | null>`
-  - Update `StrategyContext.broker.buy` type signature in `src/strategy/types.ts`
-  - Update all harness call sites (`:795`, `:862`, `:1012`) to store in `pendingOrders` instead of immediately creating `positionEntries`
-  - Add `reconcileOrders()` to harness alarm loop: poll `getOrder()` for each pending, create `positionEntries` only on `filled` (with real `filled_avg_price`), clean up on terminal states
-  Files: `src/core/types.ts`, `src/core/policy-broker.ts`, `src/strategy/types.ts`, `src/durable-objects/mahoraga-harness.ts`
+- [x] **Add order lifecycle reconciliation**
+  Added `PendingOrder` type + `TERMINAL_ORDER_STATUSES` to `core/types.ts`, `pendingOrders` to `AgentState`. Changed `PolicyBroker.buy()` to return `{ orderId: string } | null`. Updated `StrategyContext.broker.buy` signature. All 3 harness buy sites now store to `pendingOrders`. Added `reconcileOrders()` to alarm loop: polls `getOrder()`, creates `positionEntries` with real `filled_avg_price` on fill, cleans up terminal/stale orders.
+  Files: `src/core/types.ts`, `src/core/policy-broker.ts`, `src/strategy/types.ts`, `src/durable-objects/mahoraga-harness.ts`, `src/strategy/default/config.ts`
 
 ### Change 2: Daily Loss Tracking
 
