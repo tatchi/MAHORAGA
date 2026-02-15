@@ -10,15 +10,17 @@
  * They cannot bypass these safety checks.
  */
 
-import type { OrderPreview } from "../mcp/types";
+import type { OptionsOrderPreview, OrderPreview } from "../mcp/types";
 import type { PolicyConfig } from "../policy/config";
-import { type PolicyContext, PolicyEngine } from "../policy/engine";
+import { type OptionsPolicyContext, type PolicyContext, PolicyEngine } from "../policy/engine";
 import type { AlpacaProviders } from "../providers/alpaca";
+import { getDTE } from "../providers/alpaca/options";
 import type { Account, MarketClock, Position } from "../providers/types";
 import type { D1Client } from "../storage/d1/client";
 import type { RiskState } from "../storage/d1/queries/risk-state";
 import { getRiskState } from "../storage/d1/queries/risk-state";
 import { isCryptoSymbol, normalizeCryptoSymbol } from "../strategy/default/helpers/crypto";
+import type { OptionsContract } from "../strategy/default/rules/options";
 import type { StrategyContext } from "../strategy/types";
 
 export interface PolicyBrokerDeps {
@@ -235,11 +237,109 @@ export function createPolicyBroker(deps: PolicyBrokerDeps): StrategyContext["bro
     }
   }
 
+  async function buyOption(
+    contract: OptionsContract,
+    qty: number,
+    reason: string
+  ): Promise<{ orderId: string } | null> {
+    if (!contract.symbol || contract.symbol.trim().length === 0) {
+      log("PolicyBroker", "buy_option_blocked", { reason: "Empty contract symbol" });
+      return null;
+    }
+    if (qty < 1 || !Number.isFinite(qty)) {
+      log("PolicyBroker", "buy_option_blocked", {
+        symbol: contract.symbol,
+        reason: "Invalid quantity",
+        qty,
+      });
+      return null;
+    }
+
+    const dte = getDTE(contract.expiration);
+    const estimatedCost = contract.mid_price * qty * 100;
+    const limitPrice = Math.round(contract.mid_price * 100) / 100;
+
+    const preview: OptionsOrderPreview = {
+      contract_symbol: contract.symbol,
+      underlying: contract.symbol, // best-effort; policy checks don't use underlying directly
+      side: "buy",
+      qty,
+      order_type: "limit",
+      limit_price: limitPrice,
+      time_in_force: "day",
+      expiration: contract.expiration,
+      strike: contract.strike,
+      option_type: contract.option_type,
+      dte,
+      delta: contract.delta,
+      estimated_premium: contract.mid_price,
+      estimated_cost: estimatedCost,
+    };
+
+    try {
+      const [account, positions, clock, riskState] = await Promise.all([
+        getAccount(),
+        getPositions(),
+        getClock(),
+        getRiskStateOrDefault(),
+      ]);
+
+      const ctx: OptionsPolicyContext = { order: preview, account, positions, clock, riskState };
+      const result = engine.evaluateOptionsOrder(ctx);
+
+      if (!result.allowed) {
+        log("PolicyBroker", "buy_option_rejected", {
+          symbol: contract.symbol,
+          qty,
+          violations: result.violations.map((v) => v.message),
+        });
+        return null;
+      }
+
+      if (result.warnings.length > 0) {
+        log("PolicyBroker", "buy_option_warnings", {
+          symbol: contract.symbol,
+          warnings: result.warnings.map((w) => w.message),
+        });
+      }
+
+      const alpacaOrder = await alpaca.trading.createOrder({
+        symbol: contract.symbol,
+        qty,
+        side: "buy",
+        type: "limit",
+        limit_price: limitPrice,
+        time_in_force: "day",
+      });
+
+      log("PolicyBroker", "buy_option_executed", {
+        contract: contract.symbol,
+        qty,
+        status: alpacaOrder.status,
+        estimatedCost,
+        reason,
+      });
+
+      // Invalidate cache after order
+      cachedAccount = null;
+      cachedPositions = null;
+
+      return { orderId: alpacaOrder.id };
+    } catch (error) {
+      log("PolicyBroker", "buy_option_failed", {
+        symbol: contract.symbol,
+        error: String(error),
+      });
+      return null;
+    }
+  }
+
   return {
     getAccount,
     getPositions,
     getClock,
     buy,
     sell,
+    buyOption,
   };
 }

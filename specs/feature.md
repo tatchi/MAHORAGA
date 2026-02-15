@@ -36,13 +36,8 @@ Derived from `CODE-REVIEW.md` changes 1-3. Each task is atomic and independently
 
 ### Change 3: Options Policy Enforcement
 
-- [ ] **Route options orders through PolicyEngine**
-  - Add `option_type: "call" | "put"` to `OptionsContract` in `src/strategy/default/rules/options.ts`
-  - Set `option_type` in `findBestOptionsContract()` return based on `direction` param
-  - Add `buyOption()` to `PolicyBroker`: builds `OptionsOrderPreview`, runs `engine.evaluateOptionsOrder()`, creates order on approval
-  - Add `buyOption` to `StrategyContext.broker` interface in `src/strategy/types.ts`
-  - Replace `executeOptionsOrder()` call site with `ctx.broker.buyOption()` + `continue`
-  - Delete `executeOptionsOrder()` method from harness (dead code)
+- [x] **Route options orders through PolicyEngine**
+  Added `option_type: "call" | "put"` to `OptionsContract`, set in `findBestOptionsContract()` based on `direction`. Added `buyOption()` to `PolicyBroker` that builds `OptionsOrderPreview`, runs `engine.evaluateOptionsOrder()`, creates limit order on approval. Added `buyOption` to `StrategyContext.broker` interface. Replaced `executeOptionsOrder()` call site with `ctx.broker.buyOption()`. Deleted `executeOptionsOrder()` dead code from harness.
   Files: `src/strategy/default/rules/options.ts`, `src/core/policy-broker.ts`, `src/strategy/types.ts`, `src/durable-objects/mahoraga-harness.ts`
 
 ### Integration (blocked by earlier tasks)

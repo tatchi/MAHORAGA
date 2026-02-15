@@ -15,6 +15,7 @@ export interface OptionsContract {
   delta: number;
   mid_price: number;
   max_contracts: number;
+  option_type: "call" | "put";
 }
 
 /**
@@ -123,6 +124,7 @@ export async function findBestOptionsContract(
         delta: delta!,
         mid_price: midPrice,
         max_contracts: maxContracts,
+        option_type: direction === "bullish" ? "call" : "put",
       };
     }
 

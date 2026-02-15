@@ -899,7 +899,7 @@ export class MahoragaHarness extends DurableObject<Env> {
       if (entry.useOptions) {
         const contract = await findBestOptionsContract(ctx, entry.symbol, "bullish", account.equity);
         if (contract) {
-          await this.executeOptionsOrder(contract, 1, account.equity);
+          await ctx.broker.buyOption(contract, 1, entry.reason);
         }
         continue;
       }
@@ -994,49 +994,6 @@ export class MahoragaHarness extends DurableObject<Env> {
           };
         }
       }
-    }
-  }
-
-  private async executeOptionsOrder(
-    contract: { symbol: string; mid_price: number },
-    quantity: number,
-    equity: number
-  ): Promise<boolean> {
-    if (!this.state.config.options_enabled) return false;
-
-    const totalCost = contract.mid_price * quantity * 100;
-    const maxAllowed = equity * this.state.config.options_max_pct_per_trade;
-    let qty = quantity;
-
-    if (totalCost > maxAllowed) {
-      qty = Math.floor(maxAllowed / (contract.mid_price * 100));
-      if (qty < 1) {
-        this.log("Options", "skipped_size", { contract: contract.symbol, cost: totalCost, max: maxAllowed });
-        return false;
-      }
-    }
-
-    try {
-      const alpaca = createAlpacaProviders(this.env);
-      const order = await alpaca.trading.createOrder({
-        symbol: contract.symbol,
-        qty,
-        side: "buy",
-        type: "limit",
-        limit_price: Math.round(contract.mid_price * 100) / 100,
-        time_in_force: "day",
-      });
-
-      this.log("Options", "options_buy_executed", {
-        contract: contract.symbol,
-        qty,
-        status: order.status,
-        estimated_cost: (contract.mid_price * qty * 100).toFixed(2),
-      });
-      return true;
-    } catch (error) {
-      this.log("Options", "options_buy_failed", { contract: contract.symbol, error: String(error) });
-      return false;
     }
   }
 
