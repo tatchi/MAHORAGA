@@ -10,11 +10,13 @@ import type { StrategyContext } from "../../types";
 
 export interface OptionsContract {
   symbol: string;
+  underlying: string;
   strike: number;
   expiration: string;
   delta: number;
   mid_price: number;
   max_contracts: number;
+  option_type: "call" | "put";
 }
 
 /**
@@ -118,11 +120,13 @@ export async function findBestOptionsContract(
 
       return {
         symbol: contract.symbol,
+        underlying: symbol,
         strike: contract.strike,
         expiration: bestExpiration,
         delta: delta!,
         mid_price: midPrice,
         max_contracts: maxContracts,
+        option_type: direction === "bullish" ? "call" : "put",
       };
     }
 

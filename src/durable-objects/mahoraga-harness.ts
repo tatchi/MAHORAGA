@@ -11,13 +11,14 @@
 
 import { DurableObject } from "cloudflare:workers";
 import { createPolicyBroker } from "../core/policy-broker";
-import type {
-  AgentState,
-  LogEntry,
-  ResearchResult,
-  Signal,
-  SocialHistoryEntry,
-  SocialSnapshotCacheEntry,
+import {
+  type AgentState,
+  type LogEntry,
+  type ResearchResult,
+  type Signal,
+  type SocialHistoryEntry,
+  type SocialSnapshotCacheEntry,
+  TERMINAL_ORDER_STATUSES,
 } from "../core/types";
 import type { Env } from "../env.d";
 import { getDefaultPolicyConfig } from "../policy/config";
@@ -27,6 +28,7 @@ import type { Account, LLMProvider, MarketClock, Position } from "../providers/t
 import type { AgentConfig } from "../schemas/agent-config";
 import { safeValidateAgentConfig } from "../schemas/agent-config";
 import { createD1Client } from "../storage/d1/client";
+import { recordDailyLoss, setCooldown } from "../storage/d1/queries/risk-state";
 import { activeStrategy } from "../strategy";
 import { DEFAULT_STATE } from "../strategy/default/config";
 import {
@@ -64,6 +66,11 @@ export class MahoragaHarness extends DurableObject<Env> {
     this.ctx.blockConcurrencyWhile(async () => {
       const stored = await this.ctx.storage.get<AgentState>("state");
       if (stored) {
+        if (!("pendingOrders" in stored)) {
+          console.log(
+            "[MahoragaHarness] MIGRATION: stored state missing pendingOrders — any orders from previous version will not be reconciled. Verify all prior orders are terminal before deploying."
+          );
+        }
         this.state = { ...DEFAULT_STATE, ...stored };
         this.state.config = { ...DEFAULT_STATE.config, ...this.state.config };
       }
@@ -148,10 +155,20 @@ export class MahoragaHarness extends DurableObject<Env> {
       log: (agent, action, details) => self.log(agent, action, details),
       cryptoSymbols: self.state.config.crypto_symbols || [],
       allowedExchanges: self.state.config.allowed_exchanges ?? ["NYSE", "NASDAQ", "ARCA", "AMEX", "BATS"],
-      onSell: (symbol) => {
-        delete self.state.positionEntries[symbol];
-        delete self.state.socialHistory[symbol];
-        delete self.state.stalenessAnalysis[symbol];
+      getLocalEntryPrice: (symbol) => self.state.positionEntries[symbol]?.entry_price ?? null,
+      onSell: (symbol, _reason, orderId, entryPrice) => {
+        // Store pending sell for P&L computation in reconcileOrders() on fill.
+        // positionEntries/socialHistory/stalenessAnalysis cleanup is deferred
+        // to reconcileOrders() when fill is confirmed, so that if the sell
+        // order is canceled/expired/rejected the local tracking survives.
+        self.state.pendingOrders[orderId] = {
+          side: "sell",
+          orderId,
+          symbol,
+          reason: _reason,
+          submittedAt: Date.now(),
+          entryPrice,
+        };
       },
     });
 
@@ -249,6 +266,26 @@ export class MahoragaHarness extends DurableObject<Env> {
       // Positions snapshot
       const positions = await ctx.broker.getPositions();
 
+      // Backfill entry_price and update peak_price every tick
+      for (const pos of positions) {
+        const entry = this.state.positionEntries[pos.symbol];
+        if (!entry) continue;
+        if (entry.entry_price === 0 && pos.avg_entry_price > 0) {
+          entry.entry_price = pos.avg_entry_price;
+        }
+        if (entry.entry_price > 0) {
+          entry.peak_price = Math.max(entry.peak_price, pos.current_price);
+        }
+      }
+
+      // Reconcile pending orders (check for fills / terminal states)
+      if (Object.keys(this.state.pendingOrders).length > 0) {
+        await this.reconcileOrders();
+        // Persist immediately so fill-side-effects (positionEntries mutations,
+        // recordDailyLoss/setCooldown) survive a crash before end-of-alarm persist.
+        await this.persist();
+      }
+
       // Crypto trading (24/7)
       if (this.state.config.crypto_enabled) {
         await runCryptoTrading(ctx, positions);
@@ -328,6 +365,200 @@ export class MahoragaHarness extends DurableObject<Env> {
   private async scheduleNextAlarm(): Promise<void> {
     const nextRun = Date.now() + 30_000;
     await this.ctx.storage.setAlarm(nextRun);
+  }
+
+  // ============================================================================
+  // ORDER RECONCILIATION — poll pending orders for fills / terminal states
+  // ============================================================================
+
+  /**
+   * For each pending order, poll Alpaca for current status:
+   * - `filled`: create PositionEntry with real filled_avg_price, remove from pending
+   * - Other terminal state: log and remove from pending
+   * - Still active: keep pending (will retry next alarm tick)
+   *
+   * Orders older than 10 minutes are treated as stale and cleaned up.
+   */
+  private async reconcileOrders(): Promise<void> {
+    const alpaca = createAlpacaProviders(this.env);
+    const db = createD1Client(this.env.DB);
+    const STALE_ORDER_MS = 10 * 60 * 1000;
+    const MAX_POLL_FAILURES = 5;
+    const now = Date.now();
+
+    for (const [orderId, pending] of Object.entries(this.state.pendingOrders)) {
+      // Clean up stale orders that have been pending too long
+      if (now - pending.submittedAt > STALE_ORDER_MS) {
+        this.log("Reconcile", "order_stale", {
+          symbol: pending.symbol,
+          orderId,
+          side: pending.side,
+          ageMs: now - pending.submittedAt,
+        });
+        try {
+          await alpaca.trading.cancelOrder(pending.orderId);
+        } catch {
+          // Order may already be terminal — safe to ignore
+        }
+        delete this.state.pendingOrders[orderId];
+        continue;
+      }
+
+      try {
+        const order = await alpaca.trading.getOrder(pending.orderId);
+
+        if (order.status === "filled") {
+          const filledPrice = order.filled_avg_price ? parseFloat(order.filled_avg_price) : 0;
+
+          if (filledPrice <= 0) {
+            const failures = (pending.pollFailures ?? 0) + 1;
+            if (failures >= MAX_POLL_FAILURES) {
+              this.log("Reconcile", "filled_missing_price_abandoned", {
+                symbol: pending.symbol,
+                orderId,
+                side: pending.side,
+                failures,
+                rawPrice: order.filled_avg_price,
+              });
+              delete this.state.pendingOrders[orderId];
+            } else {
+              pending.pollFailures = failures;
+              this.log("Reconcile", "filled_missing_price", {
+                symbol: pending.symbol,
+                orderId,
+                side: pending.side,
+                failures,
+                rawPrice: order.filled_avg_price,
+              });
+            }
+            continue;
+          }
+
+          if (pending.side === "buy") {
+            // Buy filled — create PositionEntry keyed by underlying for options, symbol for equities
+            const entryKey = pending.underlying ?? pending.symbol;
+            const filledAtMs = order.filled_at ? new Date(order.filled_at).getTime() : NaN;
+            this.state.positionEntries[entryKey] = {
+              symbol: entryKey,
+              entry_time: Number.isFinite(filledAtMs) ? filledAtMs : pending.submittedAt,
+              entry_price: filledPrice,
+              entry_sentiment: pending.entryMeta.sentiment,
+              entry_social_volume: pending.entryMeta.socialVolume,
+              entry_sources: pending.entryMeta.sources,
+              entry_reason: pending.reason,
+              peak_price: filledPrice,
+              peak_sentiment: pending.entryMeta.sentiment,
+            };
+
+            this.log("Reconcile", "buy_filled", {
+              symbol: pending.symbol,
+              orderId,
+              filledPrice,
+            });
+          } else {
+            // Sell filled — compute realized P&L from fill price vs entry price
+            if (pending.entryPrice === null) {
+              this.log("Reconcile", "sell_filled_no_entry_price", {
+                symbol: pending.symbol,
+                orderId,
+                filledPrice,
+                note: "Skipping P&L — entry price unknown",
+              });
+            }
+            const realizedPl =
+              pending.entryPrice !== null && pending.entryPrice > 0 && filledPrice > 0
+                ? filledPrice - pending.entryPrice
+                : 0;
+
+            if (realizedPl < 0 && !db) {
+              this.log("Reconcile", "loss_not_recorded_no_db", {
+                symbol: pending.symbol,
+                orderId,
+                realizedPl,
+                note: "Database unavailable — daily loss tracking skipped",
+              });
+            }
+
+            if (realizedPl < 0 && db) {
+              const filledQty = parseFloat(order.filled_qty ?? "");
+              if (!Number.isFinite(filledQty) || filledQty <= 0 || !Number.isFinite(realizedPl)) {
+                this.log("Reconcile", "sell_filled_qty_invalid", {
+                  symbol: pending.symbol,
+                  orderId,
+                  filledQty: order.filled_qty,
+                });
+              } else {
+                // Alpaca quotes options per share; each contract = 100 shares
+                const contractMultiplier = order.asset_class === "us_option" ? 100 : 1;
+                const lossUsd = Math.abs(realizedPl) * filledQty * contractMultiplier;
+                if (lossUsd > 0) {
+                  await recordDailyLoss(db, lossUsd);
+                  const cooldownMinutes = this.state.config.cooldown_minutes_after_loss ?? 15;
+                  if (cooldownMinutes > 0) {
+                    const cooldownUntil = new Date(now + cooldownMinutes * 60 * 1000).toISOString();
+                    await setCooldown(db, cooldownUntil);
+                  }
+                  this.log("Reconcile", "daily_loss_recorded", {
+                    symbol: pending.symbol,
+                    lossPerShare: realizedPl,
+                    filledQty,
+                    lossUsd,
+                    cooldownMinutes: this.state.config.cooldown_minutes_after_loss ?? 15,
+                  });
+                }
+              }
+            }
+
+            this.log("Reconcile", "sell_filled", {
+              symbol: pending.symbol,
+              orderId,
+              filledPrice,
+              entryPrice: pending.entryPrice,
+              realizedPl,
+            });
+
+            // Clean up local tracking now that close is confirmed
+            delete this.state.positionEntries[pending.symbol];
+            delete this.state.socialHistory[pending.symbol];
+            delete this.state.stalenessAnalysis[pending.symbol];
+          }
+
+          delete this.state.pendingOrders[orderId];
+          continue;
+        }
+
+        if (TERMINAL_ORDER_STATUSES.has(order.status)) {
+          this.log("Reconcile", "order_terminal", {
+            symbol: pending.symbol,
+            orderId,
+            side: pending.side,
+            status: order.status,
+          });
+          delete this.state.pendingOrders[orderId];
+        }
+
+        // Still active — leave in pendingOrders for next tick
+      } catch (error) {
+        const failures = (pending.pollFailures ?? 0) + 1;
+        if (failures >= MAX_POLL_FAILURES) {
+          this.log("Reconcile", "order_poll_abandoned", {
+            symbol: pending.symbol,
+            orderId,
+            failures,
+            error: String(error),
+          });
+          delete this.state.pendingOrders[orderId];
+        } else {
+          pending.pollFailures = failures;
+          this.log("Reconcile", "order_poll_error", {
+            symbol: pending.symbol,
+            orderId,
+            failures,
+            error: String(error),
+          });
+        }
+      }
+    }
   }
 
   // ============================================================================
@@ -783,12 +1014,34 @@ export class MahoragaHarness extends DurableObject<Env> {
 
       if (finalConfidence < this.state.config.min_analyst_confidence) continue;
 
-      // Options routing
+      // Options routing — skip equity buy when options order fires
       if (entry.useOptions) {
         const contract = await findBestOptionsContract(ctx, entry.symbol, "bullish", account.equity);
         if (contract) {
-          await this.executeOptionsOrder(contract, 1, account.equity);
+          const optResult = await ctx.broker.buyOption(contract, 1, entry.reason);
+          if (optResult) {
+            heldSymbols.add(entry.symbol);
+            const originalSignal = this.state.signalCache.find((s) => s.symbol === entry.symbol);
+            const aggregatedSocial = socialSnapshot[entry.symbol];
+            this.state.pendingOrders[optResult.orderId] = {
+              side: "buy",
+              orderId: optResult.orderId,
+              symbol: contract.symbol,
+              underlying: contract.underlying,
+              notional: contract.mid_price * 100, // 1 contract = 100 shares
+              reason: entry.reason,
+              submittedAt: Date.now(),
+              entryMeta: {
+                sentiment: aggregatedSocial?.sentiment ?? originalSignal?.sentiment ?? finalConfidence,
+                socialVolume: aggregatedSocial?.volume ?? originalSignal?.volume ?? 0,
+                sources: aggregatedSocial
+                  ? aggregatedSocial.sources
+                  : originalSignal?.subreddits || [originalSignal?.source || "research"],
+              },
+            };
+          }
         }
+        continue;
       }
 
       // Execute buy via policy broker
@@ -797,18 +1050,20 @@ export class MahoragaHarness extends DurableObject<Env> {
         heldSymbols.add(entry.symbol);
         const originalSignal = this.state.signalCache.find((s) => s.symbol === entry.symbol);
         const aggregatedSocial = socialSnapshot[entry.symbol];
-        this.state.positionEntries[entry.symbol] = {
+        this.state.pendingOrders[result.orderId] = {
+          side: "buy",
+          orderId: result.orderId,
           symbol: entry.symbol,
-          entry_time: Date.now(),
-          entry_price: 0,
-          entry_sentiment: aggregatedSocial?.sentiment ?? originalSignal?.sentiment ?? finalConfidence,
-          entry_social_volume: aggregatedSocial?.volume ?? originalSignal?.volume ?? 0,
-          entry_sources: aggregatedSocial
-            ? aggregatedSocial.sources
-            : originalSignal?.subreddits || [originalSignal?.source || "research"],
-          entry_reason: entry.reason,
-          peak_price: 0,
-          peak_sentiment: aggregatedSocial?.sentiment ?? originalSignal?.sentiment ?? finalConfidence,
+          notional: entry.notional,
+          reason: entry.reason,
+          submittedAt: Date.now(),
+          entryMeta: {
+            sentiment: aggregatedSocial?.sentiment ?? originalSignal?.sentiment ?? finalConfidence,
+            socialVolume: aggregatedSocial?.volume ?? originalSignal?.volume ?? 0,
+            sources: aggregatedSocial
+              ? aggregatedSocial.sources
+              : originalSignal?.subreddits || [originalSignal?.source || "research"],
+          },
         };
       }
     }
@@ -864,64 +1119,23 @@ export class MahoragaHarness extends DurableObject<Env> {
           const originalSignal = this.state.signalCache.find((s) => s.symbol === rec.symbol);
           const aggregatedSocial = socialSnapshot[rec.symbol];
           heldSymbols.add(rec.symbol);
-          this.state.positionEntries[rec.symbol] = {
+          this.state.pendingOrders[result.orderId] = {
+            side: "buy",
+            orderId: result.orderId,
             symbol: rec.symbol,
-            entry_time: Date.now(),
-            entry_price: 0,
-            entry_sentiment: aggregatedSocial?.sentiment ?? originalSignal?.sentiment ?? rec.confidence,
-            entry_social_volume: aggregatedSocial?.volume ?? originalSignal?.volume ?? 0,
-            entry_sources: aggregatedSocial
-              ? aggregatedSocial.sources
-              : originalSignal?.subreddits || [originalSignal?.source || "analyst"],
-            entry_reason: rec.reasoning,
-            peak_price: 0,
-            peak_sentiment: aggregatedSocial?.sentiment ?? originalSignal?.sentiment ?? rec.confidence,
+            notional,
+            reason: rec.reasoning,
+            submittedAt: Date.now(),
+            entryMeta: {
+              sentiment: aggregatedSocial?.sentiment ?? originalSignal?.sentiment ?? rec.confidence,
+              socialVolume: aggregatedSocial?.volume ?? originalSignal?.volume ?? 0,
+              sources: aggregatedSocial
+                ? aggregatedSocial.sources
+                : originalSignal?.subreddits || [originalSignal?.source || "analyst"],
+            },
           };
         }
       }
-    }
-  }
-
-  private async executeOptionsOrder(
-    contract: { symbol: string; mid_price: number },
-    quantity: number,
-    equity: number
-  ): Promise<boolean> {
-    if (!this.state.config.options_enabled) return false;
-
-    const totalCost = contract.mid_price * quantity * 100;
-    const maxAllowed = equity * this.state.config.options_max_pct_per_trade;
-    let qty = quantity;
-
-    if (totalCost > maxAllowed) {
-      qty = Math.floor(maxAllowed / (contract.mid_price * 100));
-      if (qty < 1) {
-        this.log("Options", "skipped_size", { contract: contract.symbol, cost: totalCost, max: maxAllowed });
-        return false;
-      }
-    }
-
-    try {
-      const alpaca = createAlpacaProviders(this.env);
-      const order = await alpaca.trading.createOrder({
-        symbol: contract.symbol,
-        qty,
-        side: "buy",
-        type: "limit",
-        limit_price: Math.round(contract.mid_price * 100) / 100,
-        time_in_force: "day",
-      });
-
-      this.log("Options", "options_buy_executed", {
-        contract: contract.symbol,
-        qty,
-        status: order.status,
-        estimated_cost: (contract.mid_price * qty * 100).toFixed(2),
-      });
-      return true;
-    } catch (error) {
-      this.log("Options", "options_buy_failed", { contract: contract.symbol, error: String(error) });
-      return false;
     }
   }
 
@@ -1009,23 +1223,26 @@ export class MahoragaHarness extends DurableObject<Env> {
         );
         if (notional < 100) continue;
 
-        const result = await ctx.broker.buy(rec.symbol, notional, `Pre-market plan: ${rec.reasoning}`);
+        const reason = `Pre-market plan: ${rec.reasoning}`;
+        const result = await ctx.broker.buy(rec.symbol, notional, reason);
         if (result) {
           heldSymbols.add(rec.symbol);
           const originalSignal = this.state.signalCache.find((s) => s.symbol === rec.symbol);
           const aggregatedSocial = socialSnapshot[rec.symbol];
-          this.state.positionEntries[rec.symbol] = {
+          this.state.pendingOrders[result.orderId] = {
+            side: "buy",
+            orderId: result.orderId,
             symbol: rec.symbol,
-            entry_time: Date.now(),
-            entry_price: 0,
-            entry_sentiment: aggregatedSocial?.sentiment ?? originalSignal?.sentiment ?? 0,
-            entry_social_volume: aggregatedSocial?.volume ?? originalSignal?.volume ?? 0,
-            entry_sources: aggregatedSocial
-              ? aggregatedSocial.sources
-              : originalSignal?.subreddits || [originalSignal?.source || "premarket"],
-            entry_reason: rec.reasoning,
-            peak_price: 0,
-            peak_sentiment: aggregatedSocial?.sentiment ?? originalSignal?.sentiment ?? 0,
+            notional,
+            reason,
+            submittedAt: Date.now(),
+            entryMeta: {
+              sentiment: aggregatedSocial?.sentiment ?? originalSignal?.sentiment ?? 0,
+              socialVolume: aggregatedSocial?.volume ?? originalSignal?.volume ?? 0,
+              sources: aggregatedSocial
+                ? aggregatedSocial.sources
+                : originalSignal?.subreddits || [originalSignal?.source || "premarket"],
+            },
           };
         }
       }
@@ -1152,8 +1369,11 @@ export class MahoragaHarness extends DurableObject<Env> {
 
       for (const pos of positions || []) {
         const entry = this.state.positionEntries[pos.symbol];
-        if (entry && entry.entry_price === 0 && pos.avg_entry_price) {
+        if (!entry) continue;
+        if (entry.entry_price === 0 && pos.avg_entry_price > 0) {
           entry.entry_price = pos.avg_entry_price;
+        }
+        if (entry.entry_price > 0) {
           entry.peak_price = Math.max(entry.peak_price, pos.current_price);
         }
       }
@@ -1179,6 +1399,7 @@ export class MahoragaHarness extends DurableObject<Env> {
         signalResearch: this.state.signalResearch,
         positionResearch: this.state.positionResearch,
         positionEntries: this.state.positionEntries,
+        pendingOrders: this.state.pendingOrders,
         twitterConfirmations: this.state.twitterConfirmations,
         premarketPlan: this.state.premarketPlan,
         stalenessAnalysis: this.state.stalenessAnalysis,

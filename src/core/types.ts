@@ -5,7 +5,9 @@
  */
 
 // Re-export provider types that strategies need
-export type { Account, LLMProvider, MarketClock, Position } from "../providers/types";
+export type { Account, LLMProvider, MarketClock, OrderStatus, Position } from "../providers/types";
+
+import type { OrderStatus } from "../providers/types";
 
 // Re-export config types
 export type { AgentConfig } from "../schemas/agent-config";
@@ -53,6 +55,55 @@ export interface PositionEntry {
   peak_price: number;
   peak_sentiment: number;
 }
+
+// ---------------------------------------------------------------------------
+// Pending order — tracks submitted orders awaiting fill confirmation
+// ---------------------------------------------------------------------------
+
+/** Terminal order states where no further status change is expected. */
+export const TERMINAL_ORDER_STATUSES: ReadonlySet<OrderStatus> = new Set<OrderStatus>([
+  "filled",
+  "canceled",
+  "expired",
+  "replaced",
+  "rejected",
+  "suspended",
+]);
+
+/** Pending buy order — awaiting fill to create PositionEntry. */
+export interface PendingBuyOrder {
+  side: "buy";
+  orderId: string;
+  symbol: string;
+  notional: number;
+  reason: string;
+  submittedAt: number;
+  /** Consecutive getOrder() failures. Cleaned up at MAX_POLL_FAILURES. */
+  pollFailures?: number;
+  /** Underlying symbol for options orders — used as positionEntries key instead of OCC symbol. */
+  underlying?: string;
+  /** Metadata to populate PositionEntry on fill */
+  entryMeta: {
+    sentiment: number;
+    socialVolume: number;
+    sources: string[];
+  };
+}
+
+/** Pending sell order — awaiting fill to compute realized P&L. */
+export interface PendingSellOrder {
+  side: "sell";
+  orderId: string;
+  symbol: string;
+  reason: string;
+  submittedAt: number;
+  /** Consecutive getOrder() failures. Cleaned up at MAX_POLL_FAILURES. */
+  pollFailures?: number;
+  /** Snapshot of entry price from PositionEntry for P&L computation on fill. null if position was not found at sell time. */
+  entryPrice: number | null;
+}
+
+export type PendingOrder = PendingBuyOrder | PendingSellOrder;
 
 // ---------------------------------------------------------------------------
 // Social history — rolling time-series for staleness detection
@@ -138,6 +189,7 @@ export interface AgentState {
   config: import("../schemas/agent-config").AgentConfig;
   signalCache: Signal[];
   positionEntries: Record<string, PositionEntry>;
+  pendingOrders: Record<string, PendingOrder>;
   socialHistory: Record<string, SocialHistoryEntry[]>;
   socialSnapshotCache: Record<string, SocialSnapshotCacheEntry>;
   socialSnapshotCacheUpdatedAt: number;

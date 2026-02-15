@@ -22,6 +22,7 @@ import type {
   Signal,
 } from "../core/types";
 import type { Env } from "../env.d";
+import type { OptionsContract } from "./default/rules/options";
 
 // ---------------------------------------------------------------------------
 // StrategyContext — passed to every strategy hook
@@ -54,10 +55,12 @@ export interface StrategyContext {
     getAccount(): Promise<Account>;
     getPositions(): Promise<Position[]>;
     getClock(): Promise<MarketClock>;
-    /** Execute a buy. Returns true if the order was submitted. */
-    buy(symbol: string, notional: number, reason: string): Promise<boolean>;
-    /** Close a position. Returns true if the close was submitted. */
-    sell(symbol: string, reason: string): Promise<boolean>;
+    /** Execute a buy. Returns the order id on success, null on rejection/failure. */
+    buy(symbol: string, notional: number, reason: string): Promise<{ orderId: string } | null>;
+    /** Execute an options buy. Returns the order id on success, null on rejection/failure. */
+    buyOption(contract: OptionsContract, qty: number, reason: string): Promise<{ orderId: string } | null>;
+    /** Close a position. Returns the order id on success, null on rejection/failure. */
+    sell(symbol: string, reason: string): Promise<{ orderId: string } | null>;
   };
 
   /**

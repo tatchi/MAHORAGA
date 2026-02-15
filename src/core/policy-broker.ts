@@ -5,19 +5,21 @@
  * directly, bypassing kill switch, daily loss limits, position concentration, etc.
  * Now all trades (buy AND sell) go through PolicyEngine.evaluate() first.
  *
- * Strategies call ctx.broker.buy()/sell() and get back true/false.
- * They cannot bypass these safety checks.
+ * Strategies call ctx.broker.buy()/sell(). Both return { orderId } on
+ * submission, null on rejection. They cannot bypass these safety checks.
  */
 
-import type { OrderPreview } from "../mcp/types";
+import type { OptionsOrderPreview, OrderPreview } from "../mcp/types";
 import type { PolicyConfig } from "../policy/config";
-import { type PolicyContext, PolicyEngine } from "../policy/engine";
+import { type OptionsPolicyContext, type PolicyContext, PolicyEngine } from "../policy/engine";
 import type { AlpacaProviders } from "../providers/alpaca";
+import { getDTE } from "../providers/alpaca/options";
 import type { Account, MarketClock, Position } from "../providers/types";
 import type { D1Client } from "../storage/d1/client";
 import type { RiskState } from "../storage/d1/queries/risk-state";
 import { getRiskState } from "../storage/d1/queries/risk-state";
 import { isCryptoSymbol, normalizeCryptoSymbol } from "../strategy/default/helpers/crypto";
+import type { OptionsContract } from "../strategy/default/rules/options";
 import type { StrategyContext } from "../strategy/types";
 
 export interface PolicyBrokerDeps {
@@ -29,8 +31,10 @@ export interface PolicyBrokerDeps {
   allowedExchanges: string[];
   /** Called after a successful buy order */
   onBuy?: (symbol: string, notional: number) => void;
-  /** Called after a successful sell/close order */
-  onSell?: (symbol: string, reason: string) => void;
+  /** Called after a sell order is submitted; receives the order ID for reconciliation tracking. */
+  onSell?: (symbol: string, reason: string, orderId: string, entryPrice: number | null) => void;
+  /** Local entry price lookup — fallback when position is gone from broker (race with external close). */
+  getLocalEntryPrice?: (symbol: string) => number | null;
 }
 
 /**
@@ -83,15 +87,15 @@ export function createPolicyBroker(deps: PolicyBrokerDeps): StrategyContext["bro
     return getRiskState(db);
   }
 
-  async function buy(symbol: string, notional: number, reason: string): Promise<boolean> {
+  async function buy(symbol: string, notional: number, reason: string): Promise<{ orderId: string } | null> {
     if (!symbol || symbol.trim().length === 0) {
       log("PolicyBroker", "buy_blocked", { reason: "Empty symbol" });
-      return false;
+      return null;
     }
 
     if (notional <= 0 || !Number.isFinite(notional)) {
       log("PolicyBroker", "buy_blocked", { symbol, reason: "Invalid notional", notional });
-      return false;
+      return null;
     }
 
     const isCrypto = isCryptoSymbol(symbol, deps.cryptoSymbols);
@@ -105,7 +109,7 @@ export function createPolicyBroker(deps: PolicyBrokerDeps): StrategyContext["bro
         const asset = await alpaca.trading.getAsset(symbol);
         if (!asset) {
           log("PolicyBroker", "buy_blocked", { symbol, reason: "Asset not found" });
-          return false;
+          return null;
         }
         if (!deps.allowedExchanges.includes(asset.exchange)) {
           log("PolicyBroker", "buy_blocked", {
@@ -113,11 +117,11 @@ export function createPolicyBroker(deps: PolicyBrokerDeps): StrategyContext["bro
             reason: "Exchange not allowed",
             exchange: asset.exchange,
           });
-          return false;
+          return null;
         }
       } catch {
         log("PolicyBroker", "buy_blocked", { symbol, reason: "Asset lookup failed" });
-        return false;
+        return null;
       }
     }
 
@@ -148,7 +152,7 @@ export function createPolicyBroker(deps: PolicyBrokerDeps): StrategyContext["bro
           notional,
           violations: result.violations.map((v) => v.message),
         });
-        return false;
+        return null;
       }
 
       if (result.warnings.length > 0) {
@@ -180,22 +184,22 @@ export function createPolicyBroker(deps: PolicyBrokerDeps): StrategyContext["bro
       cachedPositions = null;
 
       deps.onBuy?.(symbol, notional);
-      return true;
+      return { orderId: alpacaOrder.id };
     } catch (error) {
       log("PolicyBroker", "buy_failed", { symbol, error: String(error) });
-      return false;
+      return null;
     }
   }
 
-  async function sell(symbol: string, reason: string): Promise<boolean> {
+  async function sell(symbol: string, reason: string): Promise<{ orderId: string } | null> {
     if (!symbol || symbol.trim().length === 0) {
       log("PolicyBroker", "sell_blocked", { reason: "Empty symbol" });
-      return false;
+      return null;
     }
 
     if (!reason || reason.trim().length === 0) {
       log("PolicyBroker", "sell_blocked", { symbol, reason: "No sell reason provided" });
-      return false;
+      return null;
     }
 
     // For sells (closing positions), we skip full PolicyEngine evaluation.
@@ -214,18 +218,138 @@ export function createPolicyBroker(deps: PolicyBrokerDeps): StrategyContext["bro
         }
       }
 
-      await alpaca.trading.closePosition(symbol);
-      log("PolicyBroker", "sell_executed", { symbol, reason });
+      // Snapshot entry price BEFORE close for P&L computation in reconciliation.
+      // Try broker positions first, fall back to local state to handle race
+      // where position was closed externally between getPositions() and closePosition().
+      const positionsBeforeClose = await getPositions();
+      const closingPosition = positionsBeforeClose.find((p) => p.symbol === symbol);
+      const entryPrice = closingPosition?.avg_entry_price ?? deps.getLocalEntryPrice?.(symbol) ?? null;
+      if (entryPrice === null) {
+        log("PolicyBroker", "sell_entry_price_unknown", {
+          symbol,
+          reason,
+          note: "Position not found in broker or local state — P&L will be skipped for this sell",
+        });
+      }
+
+      const order = await alpaca.trading.closePosition(symbol);
+      log("PolicyBroker", "sell_executed", { symbol, reason, orderId: order.id });
+
+      deps.onSell?.(symbol, reason, order.id, entryPrice);
+
+      // Invalidate cache after order + callback
+      cachedAccount = null;
+      cachedPositions = null;
+
+      return { orderId: order.id };
+    } catch (error) {
+      log("PolicyBroker", "sell_failed", { symbol, error: String(error) });
+      return null;
+    }
+  }
+
+  async function buyOption(
+    contract: OptionsContract,
+    qty: number,
+    reason: string
+  ): Promise<{ orderId: string } | null> {
+    if (!contract.symbol || contract.symbol.trim().length === 0) {
+      log("PolicyBroker", "buy_option_blocked", { reason: "Empty contract symbol" });
+      return null;
+    }
+    if (qty < 1 || !Number.isFinite(qty) || !Number.isInteger(qty)) {
+      log("PolicyBroker", "buy_option_blocked", {
+        symbol: contract.symbol,
+        reason: "Invalid quantity - options must be whole contracts",
+        qty,
+      });
+      return null;
+    }
+    if (!Number.isFinite(contract.mid_price) || contract.mid_price <= 0) {
+      log("PolicyBroker", "buy_option_blocked", {
+        symbol: contract.symbol,
+        reason: "Invalid mid_price",
+        mid_price: contract.mid_price,
+      });
+      return null;
+    }
+
+    const dte = getDTE(contract.expiration);
+    const estimatedCost = contract.mid_price * qty * 100;
+    const limitPrice = Math.round(contract.mid_price * 100) / 100;
+
+    const preview: OptionsOrderPreview = {
+      contract_symbol: contract.symbol,
+      underlying: contract.underlying,
+      side: "buy",
+      qty,
+      order_type: "limit",
+      limit_price: limitPrice,
+      time_in_force: "day",
+      expiration: contract.expiration,
+      strike: contract.strike,
+      option_type: contract.option_type,
+      dte,
+      delta: contract.delta,
+      estimated_premium: contract.mid_price,
+      estimated_cost: estimatedCost,
+    };
+
+    try {
+      const [account, positions, clock, riskState] = await Promise.all([
+        getAccount(),
+        getPositions(),
+        getClock(),
+        getRiskStateOrDefault(),
+      ]);
+
+      const ctx: OptionsPolicyContext = { order: preview, account, positions, clock, riskState };
+      const result = engine.evaluateOptionsOrder(ctx);
+
+      if (!result.allowed) {
+        log("PolicyBroker", "buy_option_rejected", {
+          symbol: contract.symbol,
+          qty,
+          violations: result.violations.map((v) => v.message),
+        });
+        return null;
+      }
+
+      if (result.warnings.length > 0) {
+        log("PolicyBroker", "buy_option_warnings", {
+          symbol: contract.symbol,
+          warnings: result.warnings.map((w) => w.message),
+        });
+      }
+
+      const alpacaOrder = await alpaca.trading.createOrder({
+        symbol: contract.symbol,
+        qty,
+        side: "buy",
+        type: "limit",
+        limit_price: limitPrice,
+        time_in_force: "day",
+      });
+
+      log("PolicyBroker", "buy_option_executed", {
+        contract: contract.symbol,
+        qty,
+        status: alpacaOrder.status,
+        estimatedCost,
+        reason,
+      });
 
       // Invalidate cache after order
       cachedAccount = null;
       cachedPositions = null;
 
-      deps.onSell?.(symbol, reason);
-      return true;
+      return { orderId: alpacaOrder.id };
     } catch (error) {
-      log("PolicyBroker", "sell_failed", { symbol, error: String(error) });
-      return false;
+      log("PolicyBroker", "buy_option_failed", {
+        symbol: contract.symbol,
+        error: String(error),
+      });
+      return null;
     }
   }
 
@@ -235,5 +359,6 @@ export function createPolicyBroker(deps: PolicyBrokerDeps): StrategyContext["bro
     getClock,
     buy,
     sell,
+    buyOption,
   };
 }
